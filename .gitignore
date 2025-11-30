@@ -1,0 +1,12 @@
+/target
+/test-assets
+/.idea
+/.agents
+
+#Logs and temp files
+*.log
+*.tmp
+
+# OS-specific files
+.DS_Store
+Thumbs.db
