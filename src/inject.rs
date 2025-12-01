@@ -73,22 +73,21 @@ pub fn inject_file(
         let orig_cc = buf[3] & 0x0F;
 
         // If we added SCTE-35, replace EVERY PMT packet with the updated section.
-        if rewrite_pmt {
-            if let (Some(pmt_pid), Some(ref section)) = (meta.pmt_pid, new_pmt_section.as_ref())
-                && pmt_pid == pid
-            {
-                // Start continuity from the incoming cc so the sequence remains monotonic.
-                let mut local_cc = Continuity::default();
-                local_cc.map.insert(pmt_pid, orig_cc);
-                let pmt_packets = packetize_pmt(section, pmt_pid, &mut local_cc)?;
-                let final_cc = local_cc.peek(pmt_pid).unwrap_or(orig_cc);
-                cc.map.insert(pmt_pid, final_cc);
-                for pkt in &pmt_packets {
-                    writer.write_all(pkt)?;
-                }
-                packet_index += 1;
-                continue;
+        if rewrite_pmt
+            && let (Some(pmt_pid), Some(section)) = (meta.pmt_pid, new_pmt_section.as_ref())
+            && pmt_pid == pid
+        {
+            // Start continuity from the incoming cc so the sequence remains monotonic.
+            let mut local_cc = Continuity::default();
+            local_cc.map.insert(pmt_pid, orig_cc);
+            let pmt_packets = packetize_pmt(section, pmt_pid, &mut local_cc)?;
+            let final_cc = local_cc.peek(pmt_pid).unwrap_or(orig_cc);
+            cc.map.insert(pmt_pid, final_cc);
+            for pkt in &pmt_packets {
+                writer.write_all(pkt)?;
             }
+            packet_index += 1;
+            continue;
         }
 
         // Normal packet: bump continuity and forward.

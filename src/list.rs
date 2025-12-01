@@ -181,12 +181,11 @@ fn pts_wrap_delta(base: u64, target: u64) -> u64 {
     let modulus = 1u64 << 33;
     let base_mod = base % modulus;
     let target_mod = target % modulus;
-    let delta = if target_mod >= base_mod {
+    if target_mod >= base_mod {
         target_mod - base_mod
     } else {
         modulus - base_mod + target_mod
-    };
-    delta
+    }
 }
 
 fn parse_scte35_pes(pes: &[u8]) -> Result<Option<Scte35CueInfo>> {

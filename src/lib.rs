@@ -484,7 +484,7 @@ pub fn build_pmt_with_scte35(existing: &[u8], new_pid: u16) -> Result<Vec<u8>> {
     // bump version_number (byte 5: bits 1..5)
     if base.len() > 5 {
         let ver = (base[5] >> 1) & 0x1F;
-        let new_ver = ((ver + 1) & 0x1F) as u8;
+        let new_ver = (ver + 1) & 0x1F;
         base[5] = (base[5] & 0b1100_0001) | (new_ver << 1);
     }
 
