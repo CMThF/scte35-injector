@@ -1,20 +1,15 @@
 use crate::{
-    allocate_pid, build_pmt_with_scte35, choose_insertion_packet, duration_to_pts, packetize_pmt,
-    packetize_scte35, probe_ts, Continuity, Cue, ProbeHints,
+    Continuity, Cue, ProbeHints, allocate_pid, build_pmt_with_scte35, choose_insertion_packet,
+    duration_to_pts, packetize_pmt, packetize_scte35, probe_ts,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use tracing::warn;
 
 /// High-level injection: read TS, inject cues, update PMT if needed, write out.
-pub fn inject_file(
-    input: &Path,
-    output: &Path,
-    cues: &[Cue],
-    hints: ProbeHints,
-) -> Result<()> {
+pub fn inject_file(input: &Path, output: &Path, cues: &[Cue], hints: ProbeHints) -> Result<()> {
     let meta = probe_ts(input, hints)?;
     let scte35_pid = if let Some(pid) = meta.scte35_pid {
         pid

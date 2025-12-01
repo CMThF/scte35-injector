@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -36,8 +36,7 @@ pub fn parse_cue_arg(raw: &str) -> Result<Cue> {
     }
 
     // Validate SCTE-35 section structure.
-    scte35::parse_splice_info_section(&payload)
-        .context("invalid SCTE-35 splice_info_section")?;
+    scte35::parse_splice_info_section(&payload).context("invalid SCTE-35 splice_info_section")?;
 
     Ok(Cue { timestamp, payload })
 }
@@ -51,12 +50,8 @@ pub fn parse_timestamp(raw: &str) -> Result<Duration> {
     if parts.len() != 3 {
         return Err(anyhow!("timestamp must be hh:mm:ss[.sss]"));
     }
-    let hours: u64 = parts[0]
-        .parse()
-        .context("invalid hours")?;
-    let minutes: u64 = parts[1]
-        .parse()
-        .context("invalid minutes")?;
+    let hours: u64 = parts[0].parse().context("invalid hours")?;
+    let minutes: u64 = parts[1].parse().context("invalid minutes")?;
     if minutes >= 60 {
         return Err(anyhow!("minutes must be < 60"));
     }
@@ -67,22 +62,17 @@ pub fn parse_timestamp(raw: &str) -> Result<Duration> {
         (parts[2], None)
     };
 
-    let seconds: u64 = secs
-        .parse()
-        .context("invalid seconds")?;
+    let seconds: u64 = secs.parse().context("invalid seconds")?;
     if seconds >= 60 {
         return Err(anyhow!("seconds must be < 60"));
     }
 
-    let mut duration =
-        Duration::from_secs(hours * 3600 + minutes * 60 + seconds);
+    let mut duration = Duration::from_secs(hours * 3600 + minutes * 60 + seconds);
 
     if let Some(frac) = millis {
         // Pad / trim to milliseconds precision.
         let frac_trimmed = &frac.chars().take(3).collect::<String>();
-        let millis: u64 = frac_trimmed
-            .parse()
-            .context("invalid fractional seconds")?;
+        let millis: u64 = frac_trimmed.parse().context("invalid fractional seconds")?;
         duration += Duration::from_millis(millis);
     }
 
@@ -128,7 +118,10 @@ impl Continuity {
         self.map.get(&pid).copied()
     }
     pub fn next(&mut self, pid: u16, suggested: Option<u8>) -> u8 {
-        let entry = self.map.entry(pid).or_insert_with(|| suggested.unwrap_or(0));
+        let entry = self
+            .map
+            .entry(pid)
+            .or_insert_with(|| suggested.unwrap_or(0));
         let current = *entry;
         *entry = (current + 1) & 0x0F;
         current
@@ -218,9 +211,7 @@ pub fn probe_ts(path: &Path, hints: ProbeHints) -> Result<TsMetadata> {
                 if scte35_pid.is_none() && es.stream_type == 0x86 {
                     scte35_pid = Some(es.pid);
                 }
-                if video_pid_hint.is_none()
-                    && matches!(es.stream_type, 0x1B | 0x24 | 0x02)
-                {
+                if video_pid_hint.is_none() && matches!(es.stream_type, 0x1B | 0x24 | 0x02) {
                     video_pid_hint = Some(es.pid);
                 }
             }
@@ -232,10 +223,10 @@ pub fn probe_ts(path: &Path, hints: ProbeHints) -> Result<TsMetadata> {
             && let Some(pts) = parse_pes_pts(payload)
         {
             let pid = header.pid;
-            pts_map
-                .entry(pid)
-                .or_default()
-                .push(PacketPts { packet_index, pts_90k: pts });
+            pts_map.entry(pid).or_default().push(PacketPts {
+                packet_index,
+                pts_90k: pts,
+            });
         }
 
         packet_index += 1;
@@ -331,8 +322,7 @@ impl PsiAssembler {
         entry.extend_from_slice(&payload[idx..]);
         let len = *self.expected_len.entry(pid).or_insert_with(|| {
             if entry.len() >= 3 {
-                let section_length =
-                    ((entry[1] as usize & 0x0F) << 8) | (entry[2] as usize);
+                let section_length = ((entry[1] as usize & 0x0F) << 8) | (entry[2] as usize);
                 3 + section_length
             } else {
                 usize::MAX
@@ -411,11 +401,7 @@ fn parse_pmt(section: &[u8]) -> Result<PmtInfo> {
     }
     let pcr_pid = {
         let pid = ((section[8] as u16 & 0x1F) << 8) | section[9] as u16;
-        if pid == 0x1FFF {
-            None
-        } else {
-            Some(pid)
-        }
+        if pid == 0x1FFF { None } else { Some(pid) }
     };
     let program_info_length = ((section[10] as usize & 0x0F) << 8) | section[11] as usize;
     let mut idx = 12 + program_info_length;
@@ -423,8 +409,7 @@ fn parse_pmt(section: &[u8]) -> Result<PmtInfo> {
     let mut es_info = Vec::new();
     while idx + 5 <= end {
         let stream_type = section[idx];
-        let elementary_pid =
-            ((section[idx + 1] as u16 & 0x1F) << 8) | section[idx + 2] as u16;
+        let elementary_pid = ((section[idx + 1] as u16 & 0x1F) << 8) | section[idx + 2] as u16;
         let es_info_length = ((section[idx + 3] as usize & 0x0F) << 8) | section[idx + 4] as usize;
         es_info.push(PmtEsInfo {
             stream_type,
@@ -525,7 +510,7 @@ pub fn build_pmt_with_scte35(existing: &[u8], new_pid: u16) -> Result<Vec<u8>> {
     base[2] = (new_section_length & 0xFF) as u8;
 
     // Recompute CRC32 (MPEG-2 polynomial)
-    use crc::{Crc, CRC_32_MPEG_2};
+    use crc::{CRC_32_MPEG_2, Crc};
     let crc_calc = Crc::<u32>::new(&CRC_32_MPEG_2);
     let crc = crc_calc.checksum(&base);
     let mut full = base;
@@ -579,13 +564,13 @@ fn packetize_payload(
         let (adaptation, payload_len, afc) = if remaining < payload_capacity {
             // Need stuffing
             let l = 183 - remaining; // adaptation_field_length
-        let mut af = Vec::with_capacity(l + 1);
-        af.push(l as u8);
-        if l > 0 {
-            af.push(0x00); // flags
-            af.extend(std::iter::repeat_n(0xFF, l - 1));
-        }
-        (af, remaining, 0b11)
+            let mut af = Vec::with_capacity(l + 1);
+            af.push(l as u8);
+            if l > 0 {
+                af.push(0x00); // flags
+                af.extend(std::iter::repeat_n(0xFF, l - 1));
+            }
+            (af, remaining, 0b11)
         } else {
             (Vec::new(), payload_capacity, 0b01)
         };
@@ -614,14 +599,13 @@ fn packetize_payload(
     Ok(packets)
 }
 
-
 // --- Tests ----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::io::Cursor;
+    use std::path::PathBuf;
 
     #[test]
     fn parse_timestamp_ok() {
@@ -679,9 +663,9 @@ mod tests {
         let mut payload = vec![
             0x00, 0x00, 0x01, 0xE0, // start code + stream_id (video)
             0x00, 0x00, // packet length (ignored)
-            0x80,       // flags: '10' for pts only
-            0x80,       // PTS_DTS_flags=10, rest zero
-            0x05,       // header data length
+            0x80, // flags: '10' for pts only
+            0x80, // PTS_DTS_flags=10, rest zero
+            0x05, // header data length
         ];
         payload.extend_from_slice(&pts_bytes);
         let parsed = parse_pes_pts(&payload).expect("pts present");
@@ -729,7 +713,9 @@ mod tests {
     fn packetize_scte35_basic() {
         let mut cc = Continuity::default();
         let b64 = "/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A==";
-        let payload = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let payload = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
         let packets = packetize_scte35(0x1FFE, 90_000, &payload, &mut cc).unwrap();
         assert!(!packets.is_empty());
         for p in &packets {
@@ -743,9 +729,18 @@ mod tests {
     #[test]
     fn choose_insertion_packet_before_target() {
         let timeline = vec![
-            PacketPts { packet_index: 10, pts_90k: 90_000 },
-            PacketPts { packet_index: 20, pts_90k: 180_000 },
-            PacketPts { packet_index: 30, pts_90k: 270_000 },
+            PacketPts {
+                packet_index: 10,
+                pts_90k: 90_000,
+            },
+            PacketPts {
+                packet_index: 20,
+                pts_90k: 180_000,
+            },
+            PacketPts {
+                packet_index: 30,
+                pts_90k: 270_000,
+            },
         ];
         let chosen = choose_insertion_packet(&timeline, 200_000).unwrap();
         assert_eq!(chosen.packet_index, 20);
@@ -794,12 +789,9 @@ mod tests {
         for p in packets {
             bytes.extend_from_slice(&p);
         }
-        let cues = crate::list::list_scte35_cues_from_reader(
-            Cursor::new(bytes),
-            0x30,
-            Some(0),
-            None
-        ).unwrap();
+        let cues =
+            crate::list::list_scte35_cues_from_reader(Cursor::new(bytes), 0x30, Some(0), None)
+                .unwrap();
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].pts_90k, expected_pts);
         assert_eq!(cues[0].payload, payload);

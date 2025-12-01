@@ -30,6 +30,7 @@ This note is for anyone picking up work on `scte35-injector` and needing the qui
 
 ## Tools (runtime + validation)
 - `cargo test` / `cargo clippy` – primary CI-level checks.
+- `cargo fmt -- --check` - check formatting
 - `ffprobe` – verify PMT and stream tagging; examples:
   - `ffprobe -hide_banner tmp/out.ts`
   - `ffprobe -v trace -show_programs -show_streams tmp/out.ts`

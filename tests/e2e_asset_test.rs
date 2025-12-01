@@ -3,9 +3,7 @@ use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use scte35_injector::{
-    inject::inject_file, parse_cue_arg, probe_ts, ProbeHints,
-};
+use scte35_injector::{ProbeHints, inject::inject_file, parse_cue_arg, probe_ts};
 
 // End-to-end on provided fixture. Skips if fixture missing.
 #[test]
@@ -19,8 +17,8 @@ fn injects_cue_and_finds_scte35_pid() {
 
     let out = tmp_path("out_inject.ts");
 
-    let cue = parse_cue_arg("00:00:10.000=/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A==")
-        .expect("cue parse");
+    let cue =
+        parse_cue_arg("00:00:10.000=/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A==").expect("cue parse");
 
     inject_file(&fixture, &out, &[cue], ProbeHints::default()).expect("inject ok");
 
@@ -32,8 +30,9 @@ fn injects_cue_and_finds_scte35_pid() {
     // PMT should list stream_type 0x86 for that PID.
     let pmt_section = meta_out.pmt_section.expect("pmt present");
     assert!(
-        pmt_section.windows(5).any(|w| w[0] == 0x86
-            && (((w[1] as u16 & 0x1F) << 8) | w[2] as u16) == scte35_pid),
+        pmt_section
+            .windows(5)
+            .any(|w| w[0] == 0x86 && (((w[1] as u16 & 0x1F) << 8) | w[2] as u16) == scte35_pid),
         "PMT lacks SCTE-35 entry"
     );
 

@@ -1,6 +1,6 @@
-use crate::{parse_pmt, parse_pat, ProbeHints, PsiAssembler, TsHeader};
+use crate::{ProbeHints, PsiAssembler, TsHeader, parse_pat, parse_pmt};
+use anyhow::{Result, anyhow};
 use base64::Engine;
-use anyhow::{anyhow, Result};
 use scte35::SpliceCommand;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -87,12 +87,15 @@ pub fn list_scte35_cues_from_reader<R: Read>(
             let timestamp =
                 std::time::Duration::from_nanos(pts_90k.saturating_mul(1_000_000_000) / 90_000);
             let base64 = base64::engine::general_purpose::STANDARD.encode(&section);
-            cues.push((this_index, Scte35CueInfo {
-                pts_90k,
-                timestamp,
-                payload: section,
-                base64,
-            }));
+            cues.push((
+                this_index,
+                Scte35CueInfo {
+                    pts_90k,
+                    timestamp,
+                    payload: section,
+                    base64,
+                },
+            ));
             // don't double-count same payload as PES below
             continue;
         }
@@ -108,7 +111,6 @@ pub fn list_scte35_cues_from_reader<R: Read>(
         if let Some(ref mut acc) = current_pes {
             acc.extend_from_slice(payload);
         }
-
     }
     if let Some(prev) = current_pes.take()
         && let Some(cue) = parse_scte35_pes(&prev)?

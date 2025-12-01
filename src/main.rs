@@ -4,11 +4,7 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 use scte35_injector::{
-    inject::inject_file,
-    list::list_scte35_cues,
-    parse_cue_arg,
-    Cue,
-    ProbeHints,
+    Cue, ProbeHints, inject::inject_file, list::list_scte35_cues, parse_cue_arg,
 };
 
 /// Inject SCTE-35 cues into an MPEG-TS file.
@@ -94,10 +90,10 @@ fn main() -> Result<()> {
         .map(|c| parse_cue_arg(c))
         .collect::<Result<Vec<_>>>()?;
 
-        let output = cli
-            .output
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("--output is required for injection"))?;
+    let output = cli
+        .output
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--output is required for injection"))?;
 
     info!(
         "Parsed {} cue(s); input={}, output={}",

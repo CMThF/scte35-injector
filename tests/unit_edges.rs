@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use scte35_injector::{
-    build_pmt_with_scte35, packetize_scte35, parse_cue_arg, parse_timestamp,
-    list::list_scte35_cues_from_reader,
+    build_pmt_with_scte35, list::list_scte35_cues_from_reader, packetize_scte35, parse_cue_arg,
+    parse_timestamp,
 };
 
 #[test]
