@@ -40,7 +40,8 @@ This note is for anyone picking up work on `scte35-injector` and needing the qui
   - `mediainfo tmp/out.ts` to ensure data stream shows up as `scte_35` (not required but useful).
 
 ## Current Behavior & Decisions
-- SCTE is carried as PSI section (`table_id 0xFC`) not PES for better tool recognition.
+- Always call it SCTE-35/scte35, never just "SCTE" (which could refer to other standards).
+- SCTE-35 is carried as PSI section (`table_id 0xFC`) not PES for better tool recognition.
 - PMT rewrite: adds stream_type `0x86`, program-level registration descriptor `CUEI`; version bumps and CRC recomputed; all PMT packets are replaced when adding SCTE so later PMT versions don’t erase the stream.
 - PTS math: `list-cues` applies `pts_adjustment`, re-bases against earliest timeline PTS, and interpolates between nearby timeline entries to report human-readable timestamps.
 - Memory: current pipeline streams packets; does not load full TS into RAM.
