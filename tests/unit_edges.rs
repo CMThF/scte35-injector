@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use scte35_injector::{
-    build_pmt_with_scte35, list::list_scte35_cues_from_reader, packetize_scte35, parse_cue_arg,
-    parse_timestamp,
+    build_pmt_with_scte35, duration_to_pts, list::list_scte35_cues_from_reader, packetize_scte35,
+    parse_cue_arg, parse_timestamp, rewrite_splice_time,
 };
 
 #[test]
@@ -66,4 +66,21 @@ fn duration_to_pts_large_does_not_panic() {
     // very large duration should not panic; value will saturate in u128 math then cast
     let d = Duration::from_secs(10_000_000);
     let _ = scte35_injector::duration_to_pts(d).unwrap();
+}
+
+#[test]
+fn rewrite_splice_time_updates_pts() {
+    let b64 = "/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A==";
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .unwrap();
+    let new_pts = duration_to_pts(Duration::from_secs(30)).unwrap();
+    let rewritten = rewrite_splice_time(&payload, new_pts).unwrap();
+    let parsed = scte35::parse_splice_info_section(&rewritten).unwrap();
+    assert_eq!(parsed.pts_adjustment, 0);
+    let pts = match parsed.splice_command {
+        scte35::SpliceCommand::TimeSignal(ts) => ts.splice_time.pts_time,
+        _ => None,
+    };
+    assert_eq!(pts, Some(new_pts & ((1u64 << 33) - 1)));
 }

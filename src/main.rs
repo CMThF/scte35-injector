@@ -19,7 +19,8 @@ struct Cli {
     #[arg(long, short = 'o')]
     output: Option<PathBuf>,
 
-    /// Cue specification: hh:mm:ss.sss=<base64 scte35 section>. Can be repeated.
+    /// Cue specification: placement[@splice]=<base64 scte35 section>. Can be repeated.
+    /// Example: 00:00:25.000@00:00:30.000=BASE64 sets packet placement at 25s and splice_time to 30s.
     #[arg(long = "cue")]
     cues: Vec<String>,
 

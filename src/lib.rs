@@ -9,19 +9,31 @@ use std::time::Duration;
 /// In-memory representation of a cue to inject.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cue {
-    pub timestamp: Duration,
+    /// Where in the TS timeline to place the packets.
+    pub placement: Duration,
+    /// Optional splice_time to embed inside the SCTE-35 command.
+    pub splice_time: Option<Duration>,
     pub payload: Vec<u8>,
 }
 
 const MAX_SECTION_SIZE: usize = 4096;
 
-/// Parse a cue argument of the form `hh:mm:ss.sss=<base64>`.
+/// Parse a cue argument of the form `placement[@splice]=<base64>`.
 pub fn parse_cue_arg(raw: &str) -> Result<Cue> {
     let (ts_str, b64_str) = raw
         .split_once('=')
-        .ok_or_else(|| anyhow!("cue must look like hh:mm:ss.sss=<base64>"))?;
+        .ok_or_else(|| anyhow!("cue must look like hh:mm:ss[.sss][@hh:mm:ss[.sss]]=<base64>"))?;
 
-    let timestamp = parse_timestamp(ts_str)?;
+    let (placement_str, splice_str) = ts_str
+        .split_once('@')
+        .map_or((ts_str, None), |(p, s)| (p, Some(s)));
+
+    let placement = parse_timestamp(placement_str)?;
+    let splice_time = if let Some(s) = splice_str {
+        Some(parse_timestamp(s)?)
+    } else {
+        None
+    };
 
     let payload = base64::engine::general_purpose::STANDARD
         .decode(b64_str)
@@ -38,7 +50,11 @@ pub fn parse_cue_arg(raw: &str) -> Result<Cue> {
     // Validate SCTE-35 section structure.
     scte35::parse_splice_info_section(&payload).context("invalid SCTE-35 splice_info_section")?;
 
-    Ok(Cue { timestamp, payload })
+    Ok(Cue {
+        placement,
+        splice_time,
+        payload,
+    })
 }
 
 pub mod inject;
@@ -139,6 +155,50 @@ pub fn duration_to_pts(duration: Duration) -> Result<u64> {
         return Err(anyhow!("Duration too large for pts: {:?}", duration));
     }
     Ok(pts as u64)
+}
+
+/// Rewrite splice_time inside a SCTE-35 section to a new 90kHz PTS.
+/// Supports time_signal and splice_insert (program-level) commands.
+pub fn rewrite_splice_time(payload: &[u8], new_pts_90k: u64) -> Result<Vec<u8>> {
+    let mut section = scte35::parse_splice_info_section(payload)
+        .context("parse splice_info_section for rewrite")?;
+    // Reset pts_adjustment so the explicit splice_time is absolute.
+    section.pts_adjustment = 0;
+    let wrapped = new_pts_90k & ((1u64 << 33) - 1);
+
+    match &mut section.splice_command {
+        scte35::SpliceCommand::TimeSignal(ts) => {
+            ts.splice_time.time_specified_flag = 1;
+            ts.splice_time.pts_time = Some(wrapped);
+        }
+        scte35::SpliceCommand::SpliceInsert(si) => {
+            si.splice_immediate_flag = 0;
+            if si.program_splice_flag == 1 {
+                si.splice_time = Some(scte35::time::SpliceTime {
+                    time_specified_flag: 1,
+                    pts_time: Some(wrapped),
+                });
+            } else {
+                for comp in &mut si.components {
+                    comp.splice_time = Some(scte35::time::SpliceTime {
+                        time_specified_flag: 1,
+                        pts_time: Some(wrapped),
+                    });
+                }
+            }
+        }
+        _ => {
+            return Err(anyhow!(
+                "splice_time rewrite not supported for this command type"
+            ));
+        }
+    }
+
+    use scte35::encoding::traits::CrcEncodable;
+    let bytes = section
+        .encode_with_crc()
+        .context("encode splice_info_section after rewrite")?;
+    Ok(bytes)
 }
 
 /// Choose insertion packet index at/before the desired PTS.
@@ -630,12 +690,21 @@ mod tests {
         // Example from crate docs: time_signal with segmentation descriptor
         let b64 = "/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A==";
         let cue = parse_cue_arg(&format!("00:00:01.000={}", b64)).unwrap();
-        assert_eq!(cue.timestamp, Duration::from_secs(1));
+        assert_eq!(cue.placement, Duration::from_secs(1));
+        assert!(cue.splice_time.is_none());
         let decoded_len = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .unwrap()
             .len();
         assert_eq!(cue.payload.len(), decoded_len);
+    }
+
+    #[test]
+    fn parse_cue_arg_with_splice_time() {
+        let b64 = "/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A==";
+        let cue = parse_cue_arg(&format!("00:00:05.000@00:00:06.500={}", b64)).unwrap();
+        assert_eq!(cue.placement, Duration::from_secs(5));
+        assert_eq!(cue.splice_time, Some(Duration::from_millis(6500)));
     }
 
     #[test]

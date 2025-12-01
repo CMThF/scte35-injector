@@ -1,6 +1,6 @@
 # scte35-injector
 
-MPEG-TS CLI tool to detect, insert, and list SCTE-35 cues.
+MPEG-TS CLI tool to detect, insert, and list SCTE-35 cues. Think of it as a lightweight shorthand alternative to common TSDuck workflows for SCTE-35.
 
 ## Disclaimer
 
@@ -8,20 +8,22 @@ MPEG-TS CLI tool to detect, insert, and list SCTE-35 cues.
 
 ## Features
 
-- **Inject cues**: Add base64-encoded SCTE-35 `splice_info_section` messages at wall-clock offsets.
-- **Auto-add SCTE PID**: If no SCTE-35 PID exists, it allocates one and updates the PMT (CRC-correct).
+- **Inject cues**: Add base64-encoded SCTE-35 `splice_info_section` messages.
+- **Dual timestamps**: `placement@splice=` — control where packets are placed *and* the internal `splice_time` carried in the cue.
+- **Auto-add SCTE-35 PID**: If none exists, allocate one, rewrite PMT (CRC-correct, with CUEI reg descriptor), and update continuity.
 - **Continuity-safe**: Maintains continuity counters for all PIDs it touches.
-- **List cues**: Read SCTE-35 cues already present in a TS (PES or PSI-carried, PMT or heuristic PID discovery).
-- **Streaming**: Reads and writes TS incrementally; no full-file buffering.
-- **Tests**: Unit, integration, and end-to-end tests (fixtures in `test/`).
+- **List cues**: Finds cues via PMT, PSI sections (`table_id 0xFC`), or PES (`stream_id 0xFC`); reports PTS and base64.
+- **Streaming**: Processes TS incrementally; no full-file buffering.
+- **Well-tested**: Unit, edge, and end-to-end tests (fixtures in `test-assets/`).
 
 ## Quickstart
 
 ```bash
 cargo run -- --input test-assets/tears_of_steel_1080p.ts \
   --output /tmp/out.ts \
-  --cue "00:10:00.000=/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A=="
+  --cue "00:00:25.000@00:00:30.000=/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A=="
 ```
+Places packets at 25s and rewrites `splice_time` to 30s inside the cue. Omit `@...` to keep the original splice time.
 
 List cues in a stream:
 
@@ -37,7 +39,8 @@ scte35-injector [OPTIONS] --input <INPUT> --output <OUTPUT>
 Options:
   -i, --input <INPUT>           Input MPEG-TS file path
   -o, --output <OUTPUT>         Output MPEG-TS file path (required for injection; ignored in list mode)
-      --cue <CUES>              Repeatable: hh:mm:ss.sss=<base64 splice_info_section>
+      --cue <CUES>              Repeatable: placement[@splice]=<base64 splice_info_section>, placement/splice in HH:MM:SS[.mmm] format
+                                 Example: 00:00:10=/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A==
       --scte35-pid <SCTE_PID>   Optional SCTE-35 PID hint (hex or decimal)
       --pcr-pid <PCR_PID>       Optional PCR PID hint
       --video-pid <VIDEO_PID>   Optional video PID hint (timing reference)
@@ -48,22 +51,22 @@ Options:
 
 ## Input cue format
 
-`--cue "HH:MM:SS.mmm=<base64>"` where base64 is a complete SCTE-35 `splice_info_section` (CRC included). The tool:
-- Parses and validates the section,
-- Converts the wall-clock timestamp to 90 kHz PTS using the reference video timeline,
-- Inserts at the nearest packet at/before the target PTS.
+- `placement`: `HH:MM:SS[.mmm]` — where to insert packets on the TS timeline.
+- Optional `@splice`: `HH:MM:SS[.mmm]` — value to write into the SCTE-35 `splice_time` (time_signal or splice_insert). If omitted, the payload’s existing splice_time is preserved.
+- `=<base64>`: complete SCTE-35 `splice_info_section` (CRC included).
+
+On inject:
+- Payload is validated; if `@splice` is provided, the cue is re-encoded with the new `splice_time` (33-bit wrap respected).
+- Packets are placed at the nearest packet at/before the target PTS derived from the reference timeline.
 
 ## Behavior and assumptions
 
 - Single-program TS expected. PMT rewrite handles one PMT; multi-PMT not yet supported.
-- If no SCTE PID exists, a free PID ≥ 0x30 is allocated and appended to the PMT once (periodic repetition TODO).
-- Bitrate preservation is best-effort; currently we insert packets (not rate-shaped). For strict CBR, add null stuffing after injection (future work).
-- Reference timing comes from the first detected video PID (or `--video-pid` hint). PCR PID is discovered from PMT unless hinted.
-- Listing mode can find cues in:
-  - PES with `stream_id 0xFC` (standard SCTE-35),
-  - PSI sections with `table_id 0xFC`,
-  - Even when PMT lacks SCTE, via heuristic PID scan.
-- Processing is streaming; the tool does not load the entire TS into memory. Memory scales with PSI assemblies and the PTS timeline (one Vec of packet index/PTS). Probe stops early after 200k packets once metadata is found; timeline is otherwise unbounded (future: sampling/capping).
+- If no SCTE PID exists, a free PID ≥ 0x30 is allocated and every PMT packet is rewritten to include it (version bump, CRC).
+- Bitrate: we insert packets; not currently doing CBR shaping. Add nulls after if you need strict rate.
+- Timing reference: first detected video PID unless `--video-pid` hint is given. PCR PID is discovered or hinted.
+- Listing: supports PSI (`table_id 0xFC`) and PES (`stream_id 0xFC`), with PMT discovery or heuristic PID scan.
+- Streaming: no full-file buffering. Probe caps metadata search to ~200k packets; timeline collection otherwise grows with duration.
 
 ## Project layout
 
@@ -71,7 +74,7 @@ Options:
 - `src/lib.rs`           Core parsing, packetization, PID allocation, timing helpers.
 - `src/inject.rs`        Injection pipeline (probe → plan → packetize → write).
 - `src/list.rs`          Cue listing pipeline.
-- `test/`                Sample TS assets (large).
+- `test-assets/`         Sample TS fixtures.
 
 ## Testing
 
@@ -92,4 +95,3 @@ cargo run -- --input test-assets/... --list-cues   # manual validation
 
 - Designed for offline processing; no network or FFmpeg runtime dependencies.
 - Assumes input TS is well-formed (188-byte packets). Errors if sync byte missing.
-

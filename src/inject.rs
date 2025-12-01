@@ -33,10 +33,18 @@ pub fn inject_file(input: &Path, output: &Path, cues: &[Cue], hints: ProbeHints)
     // Plan cue insertions: for each cue, map to packet index and packetize.
     let mut insertions: Vec<(u64, Vec<[u8; 188]>)> = Vec::new();
     for cue in cues {
-        let target_pts = duration_to_pts(cue.timestamp)?;
+        let target_pts = duration_to_pts(cue.placement)?;
         let ref_pts = choose_insertion_packet(&meta.timeline, target_pts)
-            .ok_or_else(|| anyhow!("No timeline entries to place cue at {:?}", cue.timestamp))?;
-        let pkts = packetize_scte35(scte35_pid, target_pts, &cue.payload, &mut cc)?;
+            .ok_or_else(|| anyhow!("No timeline entries to place cue at {:?}", cue.placement))?;
+
+        let payload = if let Some(splice_ts) = cue.splice_time {
+            let splice_pts = duration_to_pts(splice_ts)?;
+            crate::rewrite_splice_time(&cue.payload, splice_pts)?
+        } else {
+            cue.payload.clone()
+        };
+
+        let pkts = packetize_scte35(scte35_pid, target_pts, &payload, &mut cc)?;
         insertions.push((ref_pts.packet_index, pkts));
     }
     insertions.sort_by_key(|(idx, _)| *idx);
