@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::warn;
 
 /// High-level injection: read TS, inject cues, update PMT if needed, write out.
 pub fn inject_file(
@@ -24,25 +24,16 @@ pub fn inject_file(
 
     let mut cc = Continuity::default();
 
-    // Build PMT update packets if we had to add SCTE-35 PID.
-    let mut pmt_packets: Vec<[u8; 188]> = Vec::new();
-    if meta.scte35_pid.is_none() {
-        let pmt_pid = meta
-            .pmt_pid
-            .ok_or_else(|| anyhow!("Could not find PMT PID to update"))?;
+    // PMT update section to be packetized when first PMT packet is seen (for continuity alignment).
+    let new_pmt_section: Option<Vec<u8>> = if meta.scte35_pid.is_none() {
         let section = meta
             .pmt_section
             .as_ref()
             .ok_or_else(|| anyhow!("PMT section not captured"))?;
-        let new_section = build_pmt_with_scte35(section, scte35_pid)?;
-        pmt_packets = packetize_pmt(&new_section, pmt_pid, &mut cc)?;
-        info!(
-            "Added SCTE-35 PID 0x{:X}, PMT PID 0x{:X}, PMT packets {}",
-            scte35_pid,
-            pmt_pid,
-            pmt_packets.len()
-        );
-    }
+        Some(build_pmt_with_scte35(section, scte35_pid)?)
+    } else {
+        None
+    };
 
     // Plan cue insertions: for each cue, map to packet index and packetize.
     let mut insertions: Vec<(u64, Vec<[u8; 188]>)> = Vec::new();
@@ -65,7 +56,9 @@ pub fn inject_file(
     let mut buf = [0u8; 188];
     let mut packet_index: u64 = 0;
     let mut ins_cursor = 0usize;
-    let mut pmt_done = meta.scte35_pid.is_some();
+    // If we had to add an SCTE-35 stream, rewrite every PMT packet with the
+    // updated section to avoid later PMT versions removing the new stream.
+    let rewrite_pmt = meta.scte35_pid.is_none();
 
     while reader.read_exact(&mut buf).is_ok() {
         // Inject cues scheduled before current packet_index
@@ -78,17 +71,29 @@ pub fn inject_file(
 
         let pid = ((buf[1] as u16 & 0x1F) << 8) | buf[2] as u16;
         let orig_cc = buf[3] & 0x0F;
-        let cc_val = cc.next(pid, Some(orig_cc));
-        buf[3] = (buf[3] & 0xF0) | cc_val;
 
-        // If we need to emit updated PMT, do it when we encounter the first PMT packet.
-        if !pmt_done && meta.pmt_pid.is_some_and(|p| p == pid) {
-            for pkt in &pmt_packets {
-                writer.write_all(pkt)?;
+        // If we added SCTE-35, replace EVERY PMT packet with the updated section.
+        if rewrite_pmt {
+            if let (Some(pmt_pid), Some(ref section)) = (meta.pmt_pid, new_pmt_section.as_ref())
+                && pmt_pid == pid
+            {
+                // Start continuity from the incoming cc so the sequence remains monotonic.
+                let mut local_cc = Continuity::default();
+                local_cc.map.insert(pmt_pid, orig_cc);
+                let pmt_packets = packetize_pmt(section, pmt_pid, &mut local_cc)?;
+                let final_cc = local_cc.peek(pmt_pid).unwrap_or(orig_cc);
+                cc.map.insert(pmt_pid, final_cc);
+                for pkt in &pmt_packets {
+                    writer.write_all(pkt)?;
+                }
+                packet_index += 1;
+                continue;
             }
-            pmt_done = true;
         }
 
+        // Normal packet: bump continuity and forward.
+        let cc_val = cc.next(pid, Some(orig_cc));
+        buf[3] = (buf[3] & 0xF0) | cc_val;
         writer.write_all(&buf)?;
         packet_index += 1;
     }

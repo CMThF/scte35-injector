@@ -481,15 +481,43 @@ pub fn build_pmt_with_scte35(existing: &[u8], new_pid: u16) -> Result<Vec<u8>> {
         return Err(anyhow!("PMT section incomplete"));
     }
     let mut base = existing[..body_len - 4].to_vec(); // without CRC
-    // Append new ES info
+    // bump version_number (byte 5: bits 1..5)
+    if base.len() > 5 {
+        let ver = (base[5] >> 1) & 0x1F;
+        let new_ver = ((ver + 1) & 0x1F) as u8;
+        base[5] = (base[5] & 0b1100_0001) | (new_ver << 1);
+    }
+
+    // Program-level registration descriptor "CUEI" (common in the wild).
+    let reg_desc: [u8; 6] = [0x05, 0x04, b'C', b'U', b'E', b'I'];
+    let prog_info_len = (((base[10] & 0x0F) as usize) << 8) | base[11] as usize;
+    let prog_info_start = 12;
+    let prog_info_end = prog_info_start + prog_info_len;
+    let mut delta_len = 0usize;
+    if prog_info_end > base.len() {
+        return Err(anyhow!("PMT program_info_length inconsistent"));
+    }
+    let has_reg = base[prog_info_start..prog_info_end]
+        .windows(reg_desc.len())
+        .any(|w| w == reg_desc);
+    if !has_reg {
+        base.splice(prog_info_end..prog_info_end, reg_desc.iter().cloned());
+        let new_len = prog_info_len + reg_desc.len();
+        base[10] = (base[10] & 0xF0) | ((new_len >> 8) as u8 & 0x0F);
+        base[11] = (new_len & 0xFF) as u8;
+        delta_len += reg_desc.len();
+    }
+
+    // Append new ES entry for SCTE-35. ES info kept empty (descriptor already at program level).
+    let es_info_len: u16 = 0;
     base.push(0x86); // stream_type
     base.push(((new_pid >> 8) as u8) | 0xE0);
     base.push((new_pid & 0xFF) as u8);
-    base.push(0xF0);
-    base.push(0x00); // es_info_length = 0
+    base.push(0xF0 | ((es_info_len >> 8) as u8 & 0x0F));
+    base.push((es_info_len & 0xFF) as u8);
 
     // Update section_length (starts at byte 1 bits 0..11)
-    let new_section_length = section_length + 5;
+    let new_section_length = section_length + 5 + delta_len;
     if new_section_length > 0x0FFF {
         return Err(anyhow!("PMT section too large after adding SCTE stream"));
     }
@@ -513,47 +541,19 @@ pub fn packetize_pmt(section: &[u8], pid: u16, cc: &mut Continuity) -> Result<Ve
 /// Packetize SCTE-35 cue payload into TS packets on given PID at PTS.
 pub fn packetize_scte35(
     pid: u16,
-    pts_90k: u64,
+    _pts_90k: u64,
     payload: &[u8],
     cc: &mut Continuity,
 ) -> Result<Vec<[u8; 188]>> {
-    let pes = build_scte35_pes(pts_90k, payload)?;
-    packetize_pes(pid, &pes, cc)
-}
-
-fn build_scte35_pes(pts_90k: u64, payload: &[u8]) -> Result<Vec<u8>> {
-    let payload_len = payload.len();
-    if payload_len > (u16::MAX as usize - 8) {
+    // section_length is 12 bits; max section size is 4096 including CRC.
+    if payload.len() > 4093 {
         return Err(anyhow!(
-            "SCTE-35 payload too large: {} bytes (max {})",
-            payload_len,
-            u16::MAX as usize - 8
+            "SCTE-35 section too large: {} bytes (max 4093)",
+            payload.len()
         ));
     }
-    let mut pes = Vec::new();
-    // PES header
-    pes.extend_from_slice(&[0x00, 0x00, 0x01]);
-    pes.push(0xFC); // stream_id private_stream_1
-    // packet length = optional header (3 + 5 for PTS) + payload length
-    let packet_len: u16 = 3 + 5 + (payload_len as u16);
-    pes.extend_from_slice(&packet_len.to_be_bytes());
-    pes.push(0x80); // '10' marker, no scrambling, priority=0, data_alignment=0
-    pes.push(0x80); // PTS only
-    pes.push(0x05); // header data length
-    pes.extend_from_slice(&encode_pts(pts_90k, 0b0010));
-    pes.extend_from_slice(payload);
-    Ok(pes)
-}
-
-fn encode_pts(val: u64, prefix: u8) -> [u8; 5] {
-    // prefix should be 0010 for PTS
-    let mut out = [0u8; 5];
-    out[0] = (prefix << 4) | (((val >> 30) as u8 & 0x07) << 1) | 1;
-    out[1] = (val >> 22) as u8;
-    out[2] = (((val >> 15) as u8 & 0x7F) << 1) | 1;
-    out[3] = (val >> 7) as u8;
-    out[4] = (((val & 0x7F) as u8) << 1) | 1;
-    out
+    // Carry SCTE-35 as private section (table_id 0xFC) for better downstream detection.
+    packetize_section(payload, pid, cc)
 }
 
 fn packetize_section(section: &[u8], pid: u16, cc: &mut Continuity) -> Result<Vec<[u8; 188]>> {
@@ -562,10 +562,6 @@ fn packetize_section(section: &[u8], pid: u16, cc: &mut Continuity) -> Result<Ve
     data.push(0); // pointer_field = 0
     data.extend_from_slice(section);
     packetize_payload(pid, true, &data, cc)
-}
-
-fn packetize_pes(pid: u16, pes: &[u8], cc: &mut Continuity) -> Result<Vec<[u8; 188]>> {
-    packetize_payload(pid, true, pes, cc)
 }
 
 fn packetize_payload(
@@ -765,12 +761,20 @@ mod tests {
         let new_sec = build_pmt_with_scte35(&section, 0x1FFE).unwrap();
         let old_len = ((section[1] as usize & 0x0F) << 8) | section[2] as usize;
         let new_len = ((new_sec[1] as usize & 0x0F) << 8) | new_sec[2] as usize;
-        assert_eq!(new_len, old_len + 5);
+        // added ES info is 5 bytes + 6-byte reg descriptor = 11 bytes
+        assert_eq!(new_len, old_len + 11);
         assert_eq!(new_sec.len(), 3 + new_len);
-        // Check stream_type and PID present near end (before CRC)
-        let pos = new_sec.len() - 4 - 5;
-        assert_eq!(new_sec[pos], 0x86);
-        let pid = ((new_sec[pos + 1] as u16 & 0x1F) << 8) | new_sec[pos + 2] as u16;
+        // Program-level reg descriptor added
+        let prog_info_len = ((new_sec[10] as usize & 0x0F) << 8) | new_sec[11] as usize;
+        let prog_info = &new_sec[12..12 + prog_info_len];
+        assert!(
+            prog_info.windows(6).any(|w| w == b"\x05\x04CUEI"),
+            "registration descriptor missing"
+        );
+        // ES entry present with stream_type and PID (last entry)
+        let es_pos = new_sec.len() - 4 - 5;
+        assert_eq!(new_sec[es_pos], 0x86);
+        let pid = ((new_sec[es_pos + 1] as u16 & 0x1F) << 8) | new_sec[es_pos + 2] as u16;
         assert_eq!(pid, 0x1FFE);
     }
 
@@ -781,6 +785,10 @@ mod tests {
         let payload = base64::engine::general_purpose::STANDARD
             .decode("/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A==")
             .unwrap();
+        let splice = scte35::parse_splice_info_section(&payload).unwrap();
+        let expected_pts =
+            crate::list::splice_command_pts(&splice.splice_command, splice.pts_adjustment)
+                .unwrap_or(0);
         let packets = packetize_scte35(0x30, 90_000, &payload, &mut cc).unwrap();
         let mut bytes = Vec::new();
         for p in packets {
@@ -788,10 +796,12 @@ mod tests {
         }
         let cues = crate::list::list_scte35_cues_from_reader(
             Cursor::new(bytes),
-            0x30
+            0x30,
+            Some(0),
+            None
         ).unwrap();
         assert_eq!(cues.len(), 1);
-        assert_eq!(cues[0].pts_90k, 90_000);
+        assert_eq!(cues[0].pts_90k, expected_pts);
         assert_eq!(cues[0].payload, payload);
     }
 

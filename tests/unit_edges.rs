@@ -57,7 +57,7 @@ fn list_cues_from_reader_bad_stream_id_yields_none() {
     payload.extend_from_slice(&pes);
     payload.resize(184, 0xFF);
     pkt.extend_from_slice(&payload);
-    let cues = list_scte35_cues_from_reader(Cursor::new(pkt), 0x30).unwrap();
+    let cues = list_scte35_cues_from_reader(Cursor::new(pkt), 0x30, Some(0), None).unwrap();
     assert!(cues.is_empty());
 }
 
