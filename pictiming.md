@@ -338,7 +338,9 @@ Example at 29.97fps (`time_scale=60000`, `num_units_in_tick=1001`):
 
 ## Implementation Status
 
-### Completed (`src/h264.rs`)
+### Completed
+
+**Core H.264 module (`src/h264.rs`):**
 
 1. **BitWriter** - Bit-level encoding for SEI payload construction
 2. **RBSP handling** - Emulation prevention byte insertion/removal
@@ -349,16 +351,31 @@ Example at 29.97fps (`time_scale=60000`, `num_units_in_tick=1001`):
 7. **Time arithmetic** - Milliseconds to frame count, PTS delta calculation
 8. **SEI injection helpers** - `inject_sei_into_access_unit()`, `PicTimingState`
 
-### Remaining (TS Pipeline Integration)
+**TS Pipeline Integration (`src/lib.rs`, `src/inject.rs`):**
 
-The h264 module provides all building blocks. Full integration requires:
+1. **PES reassembly** - `PesAccumulator` accumulates video TS packets into complete PES
+2. **Access unit detection** - PES boundaries serve as access unit boundaries
+3. **Keyframe-triggered injection** - `process_video_pes_for_sei()` processes IDR frames
+4. **PES re-packetization** - `packetize_payload()` splits modified payload back into TS packets
 
-1. **PES reassembly** - Accumulate video TS packets into complete PES
-2. **Access unit detection** - Identify boundaries between access units
-3. **Keyframe-triggered injection** - Process IDR frames, inject SEI
-4. **PES re-packetization** - Split modified payload back into TS packets
+**Testing:**
 
-### Usage (h264 module API)
+- 50+ unit tests for H.264 module
+- End-to-end test verifying SEI injection (53 keyframes in sample asset)
+
+### Usage (CLI)
+
+```bash
+# Inject Picture Timing SEI starting at 18:00:00.000 on all keyframes
+scte35-injector -i input.ts -o output.ts --pic-timing-start "18:00:00.000"
+
+# Combine with SCTE-35 cue injection
+scte35-injector -i input.ts -o output.ts \
+    --pic-timing-start "18:00:00.000" \
+    --cue "00:00:10.000=/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A=="
+```
+
+### Usage (Rust API)
 
 ```rust
 use scte35_injector::h264::{ClockTimestamp, PicTimingState, contains_idr, inject_sei_into_access_unit};
