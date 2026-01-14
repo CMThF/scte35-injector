@@ -57,6 +57,7 @@ pub fn parse_cue_arg(raw: &str) -> Result<Cue> {
     })
 }
 
+pub mod h264;
 pub mod inject;
 pub mod list;
 

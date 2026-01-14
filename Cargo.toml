@@ -11,5 +11,6 @@ mpeg2ts = "0.3.1"
 mpeg2ts-reader = "0.18.2"
 scte35 = "0.2.0"
 crc = "3.4"
+h264-reader = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
