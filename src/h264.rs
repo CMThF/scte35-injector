@@ -380,7 +380,7 @@ impl PicStruct {
 }
 
 /// Clock timestamp for Picture Timing SEI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ClockTimestamp {
     /// Clock type: 0=progressive, 1=interlaced, 2=unknown, 3=reserved
     pub ct_type: u8,
@@ -400,22 +400,6 @@ pub struct ClockTimestamp {
     pub hours: u8,
     /// Time offset in clock ticks (can be negative)
     pub time_offset: i32,
-}
-
-impl Default for ClockTimestamp {
-    fn default() -> Self {
-        Self {
-            ct_type: 0,       // progressive
-            counting_type: 0, // unknown
-            discontinuity_flag: false,
-            cnt_dropped_flag: false,
-            n_frames: 0,
-            seconds: 0,
-            minutes: 0,
-            hours: 0,
-            time_offset: 0,
-        }
-    }
 }
 
 impl ClockTimestamp {
@@ -685,9 +669,7 @@ impl PicTimingSei {
             // For sizes >= 255, write 0xFF bytes then remainder
             let full_bytes = size / 255;
             let remainder = size % 255;
-            for _ in 0..full_bytes {
-                nal.push(0xFF);
-            }
+            nal.extend(std::iter::repeat_n(0xFFu8, full_bytes));
             nal.push(remainder as u8);
         }
 

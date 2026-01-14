@@ -116,7 +116,9 @@ pub fn inject_file_with_pic_timing(
         }
 
         // Handle video packets for SEI injection
-        if pic_timing.is_some() && Some(pid) == video_pid {
+        if let Some(ref mut pt) = pic_timing
+            && Some(pid) == video_pid
+        {
             let payload_offset = if afc == 0b10 || afc == 0b11 {
                 5 + buf[4] as usize
             } else {
@@ -131,9 +133,7 @@ pub fn inject_file_with_pic_timing(
             // Accumulate video PES
             if let Some((pes_data, pes_pts)) = video_pes.push(pusi, payload) {
                 // Process completed PES - inject SEI if keyframe
-                if let Some(modified_pes) =
-                    process_video_pes_for_sei(&pes_data, pes_pts, pic_timing.as_mut().unwrap())
-                {
+                if let Some(modified_pes) = process_video_pes_for_sei(&pes_data, pes_pts, pt) {
                     // Output the modified PES as TS packets
                     let packets = packetize_payload(pid, true, &modified_pes, &mut cc)?;
                     for pkt in &packets {
@@ -161,21 +161,19 @@ pub fn inject_file_with_pic_timing(
     }
 
     // Flush remaining video PES if any
-    if pic_timing.is_some() && let Some(video_pid) = video_pid {
-        if let Some((pes_data, pes_pts)) = video_pes.flush() {
-            if let Some(modified_pes) =
-                process_video_pes_for_sei(&pes_data, pes_pts, pic_timing.as_mut().unwrap())
-            {
-                let packets = packetize_payload(video_pid, true, &modified_pes, &mut cc)?;
-                for pkt in &packets {
-                    writer.write_all(pkt)?;
-                }
-                sei_injection_count += 1;
-            } else {
-                let packets = packetize_payload(video_pid, true, &pes_data, &mut cc)?;
-                for pkt in &packets {
-                    writer.write_all(pkt)?;
-                }
+    if let (Some(pt), Some(video_pid)) = (&mut pic_timing, video_pid)
+        && let Some((pes_data, pes_pts)) = video_pes.flush()
+    {
+        if let Some(modified_pes) = process_video_pes_for_sei(&pes_data, pes_pts, pt) {
+            let packets = packetize_payload(video_pid, true, &modified_pes, &mut cc)?;
+            for pkt in &packets {
+                writer.write_all(pkt)?;
+            }
+            sei_injection_count += 1;
+        } else {
+            let packets = packetize_payload(video_pid, true, &pes_data, &mut cc)?;
+            for pkt in &packets {
+                writer.write_all(pkt)?;
             }
         }
     }
