@@ -20,7 +20,7 @@ MPEG-TS CLI tool to detect, insert, and list SCTE-35 cues. Think of it as a ligh
 ## Quickstart
 
 ```bash
-cargo run -- --input test-assets/tears_of_steel_1080p.ts \
+scte35-injector --input test-assets/tears_of_steel_1080p.ts \
   --output /tmp/out.ts \
   --cue "00:00:25.000@00:00:30.000=/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A=="
 ```
@@ -29,7 +29,7 @@ Places packets at 25s and rewrites `splice_time` to 30s inside the cue. Omit `@.
 Inject Picture Timing SEI on all keyframes starting at 18:00:00:
 
 ```bash
-cargo run -- --input test-assets/tears_of_steel_1080p.ts \
+scte35-injector --input test-assets/tears_of_steel_1080p.ts \
   --output /tmp/out.ts \
   --pic-timing-start "18:00:00.000"
 ```
@@ -37,7 +37,7 @@ cargo run -- --input test-assets/tears_of_steel_1080p.ts \
 List cues in a stream:
 
 ```bash
-cargo run -- --input test-assets/scte35_splice_inserts_with_auto_return.ts --list-cues
+scte35-injector --input test-assets/scte35_splice_inserts_with_auto_return.ts --list-cues
 ```
 
 ## CLI
@@ -82,7 +82,7 @@ The `--pic-timing-start` option injects H.264 Picture Timing SEI messages (ITU-T
 Example combining SCTE-35 cues with Picture Timing SEI:
 
 ```bash
-cargo run -- --input input.ts --output output.ts \
+scte35-injector --input input.ts --output output.ts \
   --pic-timing-start "18:00:00.000" \
   --cue "00:00:10.000=/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A=="
 ```
