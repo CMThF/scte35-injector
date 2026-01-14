@@ -39,6 +39,11 @@ struct Cli {
     /// List SCTE-35 cues found in the input and exit (no injection).
     #[arg(long = "list-cues")]
     list_cues: bool,
+
+    /// Start time for Picture Timing SEI injection (format: HH:MM:SS.mmm).
+    /// When set, injects Picture Timing SEI on video keyframes with incrementing timestamps.
+    #[arg(long = "pic-timing-start")]
+    pic_timing_start: Option<String>,
 }
 
 fn init_tracing() {

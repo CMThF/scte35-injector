@@ -430,6 +430,125 @@ impl ClockTimestamp {
         }
     }
 
+    /// Parse a clock timestamp from string format "HH:MM:SS.mmm".
+    ///
+    /// Milliseconds are converted to frame count based on the provided frame rate.
+    pub fn from_time_str(s: &str, frame_rate: f64) -> Result<Self, String> {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 3 {
+            return Err(format!("Invalid time format '{}', expected HH:MM:SS.mmm", s));
+        }
+
+        let hours: u8 = parts[0]
+            .parse()
+            .map_err(|_| format!("Invalid hours in '{}'", s))?;
+
+        let minutes: u8 = parts[1]
+            .parse()
+            .map_err(|_| format!("Invalid minutes in '{}'", s))?;
+
+        // Parse seconds and optional milliseconds
+        let (seconds, millis) = if let Some((sec_str, ms_str)) = parts[2].split_once('.') {
+            let sec: u8 = sec_str
+                .parse()
+                .map_err(|_| format!("Invalid seconds in '{}'", s))?;
+            // Pad or truncate milliseconds to 3 digits
+            let ms_padded = format!("{:0<3}", ms_str);
+            let ms: u32 = ms_padded[..3]
+                .parse()
+                .map_err(|_| format!("Invalid milliseconds in '{}'", s))?;
+            (sec, ms)
+        } else {
+            let sec: u8 = parts[2]
+                .parse()
+                .map_err(|_| format!("Invalid seconds in '{}'", s))?;
+            (sec, 0)
+        };
+
+        // Validate ranges
+        if hours > 23 {
+            return Err(format!("Hours {} out of range (0-23)", hours));
+        }
+        if minutes > 59 {
+            return Err(format!("Minutes {} out of range (0-59)", minutes));
+        }
+        if seconds > 59 {
+            return Err(format!("Seconds {} out of range (0-59)", seconds));
+        }
+
+        // Convert milliseconds to frame count
+        let n_frames = if frame_rate > 0.0 {
+            ((millis as f64 * frame_rate) / 1000.0).floor() as u8
+        } else {
+            0
+        };
+
+        Ok(Self::new(hours, minutes, seconds, n_frames))
+    }
+
+    /// Add seconds to this timestamp, returning a new timestamp.
+    ///
+    /// Handles overflow into minutes, hours, and 24-hour wrap.
+    pub fn add_seconds(&self, seconds_to_add: u64, frame_rate: f64) -> Self {
+        let total_seconds = self.hours as u64 * 3600
+            + self.minutes as u64 * 60
+            + self.seconds as u64
+            + seconds_to_add;
+
+        // Calculate frames from the fractional part
+        let frames_per_second = frame_rate.ceil() as u64;
+        let total_frames = self.n_frames as u64;
+
+        // Wrap at 24 hours
+        let wrapped_seconds = total_seconds % (24 * 3600);
+
+        let hours = ((wrapped_seconds / 3600) % 24) as u8;
+        let minutes = ((wrapped_seconds % 3600) / 60) as u8;
+        let seconds = (wrapped_seconds % 60) as u8;
+        let n_frames = if frames_per_second > 0 {
+            (total_frames % frames_per_second) as u8
+        } else {
+            0
+        };
+
+        Self {
+            hours,
+            minutes,
+            seconds,
+            n_frames,
+            ..self.clone()
+        }
+    }
+
+    /// Add 90kHz PTS ticks to this timestamp, returning a new timestamp.
+    pub fn add_pts_ticks(&self, pts_ticks: u64, frame_rate: f64) -> Self {
+        // Convert PTS ticks to seconds and frame offset
+        let seconds_to_add = pts_ticks / 90_000;
+        let remaining_ticks = pts_ticks % 90_000;
+
+        // Convert remaining ticks to frames
+        let frames_to_add = if frame_rate > 0.0 {
+            ((remaining_ticks as f64 * frame_rate) / 90_000.0).floor() as u64
+        } else {
+            0
+        };
+
+        let mut result = self.add_seconds(seconds_to_add, frame_rate);
+
+        // Add the frame offset
+        let frames_per_second = frame_rate.ceil() as u64;
+        if frames_per_second > 0 {
+            let total_frames = result.n_frames as u64 + frames_to_add;
+            let extra_seconds = total_frames / frames_per_second;
+            result.n_frames = (total_frames % frames_per_second) as u8;
+            if extra_seconds > 0 {
+                result = result.add_seconds(extra_seconds, frame_rate);
+            }
+        }
+
+        result
+    }
+
     /// Encode clock timestamp to bit stream.
     fn encode(&self, bits: &mut BitWriter, time_offset_length: u8) {
         bits.write_bits(self.ct_type as u32, 2);
@@ -986,5 +1105,86 @@ mod tests {
         // Access unit with only IDR, no SPS
         let data = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB];
         assert!(extract_vui_from_access_unit(&data).is_none());
+    }
+
+    #[test]
+    fn test_clock_timestamp_from_time_str_basic() {
+        let ts = ClockTimestamp::from_time_str("18:30:45.000", 30.0).unwrap();
+        assert_eq!(ts.hours, 18);
+        assert_eq!(ts.minutes, 30);
+        assert_eq!(ts.seconds, 45);
+        assert_eq!(ts.n_frames, 0);
+    }
+
+    #[test]
+    fn test_clock_timestamp_from_time_str_with_millis() {
+        // 500ms at 30fps = 15 frames
+        let ts = ClockTimestamp::from_time_str("00:00:00.500", 30.0).unwrap();
+        assert_eq!(ts.n_frames, 15);
+
+        // 100ms at 30fps = 3 frames
+        let ts = ClockTimestamp::from_time_str("00:00:00.100", 30.0).unwrap();
+        assert_eq!(ts.n_frames, 3);
+    }
+
+    #[test]
+    fn test_clock_timestamp_from_time_str_29_97fps() {
+        // 500ms at 29.97fps = 14.985 -> 14 frames
+        let ts = ClockTimestamp::from_time_str("18:00:00.500", 29.97).unwrap();
+        assert_eq!(ts.hours, 18);
+        assert_eq!(ts.n_frames, 14);
+    }
+
+    #[test]
+    fn test_clock_timestamp_from_time_str_no_millis() {
+        let ts = ClockTimestamp::from_time_str("12:34:56", 30.0).unwrap();
+        assert_eq!(ts.hours, 12);
+        assert_eq!(ts.minutes, 34);
+        assert_eq!(ts.seconds, 56);
+        assert_eq!(ts.n_frames, 0);
+    }
+
+    #[test]
+    fn test_clock_timestamp_from_time_str_invalid() {
+        assert!(ClockTimestamp::from_time_str("invalid", 30.0).is_err());
+        assert!(ClockTimestamp::from_time_str("12:34", 30.0).is_err());
+        assert!(ClockTimestamp::from_time_str("25:00:00.000", 30.0).is_err()); // hours out of range
+        assert!(ClockTimestamp::from_time_str("00:60:00.000", 30.0).is_err()); // minutes out of range
+        assert!(ClockTimestamp::from_time_str("00:00:60.000", 30.0).is_err()); // seconds out of range
+    }
+
+    #[test]
+    fn test_clock_timestamp_add_seconds() {
+        let ts = ClockTimestamp::new(0, 0, 30, 0);
+        let result = ts.add_seconds(45, 30.0);
+        assert_eq!(result.minutes, 1);
+        assert_eq!(result.seconds, 15);
+    }
+
+    #[test]
+    fn test_clock_timestamp_add_seconds_hour_overflow() {
+        let ts = ClockTimestamp::new(23, 59, 30, 0);
+        let result = ts.add_seconds(60, 30.0);
+        assert_eq!(result.hours, 0); // Wrapped to next day
+        assert_eq!(result.minutes, 0);
+        assert_eq!(result.seconds, 30);
+    }
+
+    #[test]
+    fn test_clock_timestamp_add_pts_ticks() {
+        let ts = ClockTimestamp::new(0, 0, 0, 0);
+        // Add 1 second in PTS ticks (90000)
+        let result = ts.add_pts_ticks(90_000, 30.0);
+        assert_eq!(result.seconds, 1);
+        assert_eq!(result.n_frames, 0);
+    }
+
+    #[test]
+    fn test_clock_timestamp_add_pts_ticks_with_frames() {
+        let ts = ClockTimestamp::new(0, 0, 0, 0);
+        // Add 1.5 seconds in PTS ticks (135000)
+        let result = ts.add_pts_ticks(135_000, 30.0);
+        assert_eq!(result.seconds, 1);
+        assert_eq!(result.n_frames, 15); // 0.5s at 30fps = 15 frames
     }
 }
