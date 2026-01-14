@@ -709,6 +709,82 @@ impl PicTimingSei {
     }
 }
 
+/// Inject Picture Timing SEI into an H.264 access unit.
+///
+/// The SEI is inserted at the appropriate position (after AUD/SPS/PPS, before slice).
+/// Returns the modified access unit data with SEI injected.
+///
+/// Returns None if the access unit doesn't contain a slice.
+pub fn inject_sei_into_access_unit(
+    access_unit: &[u8],
+    sei_nal: &[u8],
+) -> Option<Vec<u8>> {
+    let insertion_point = find_sei_insertion_point(access_unit);
+
+    // If insertion point is at the end, there's no slice - don't inject
+    if insertion_point >= access_unit.len() {
+        return None;
+    }
+
+    let mut result = Vec::with_capacity(access_unit.len() + sei_nal.len());
+    result.extend_from_slice(&access_unit[..insertion_point]);
+    result.extend_from_slice(sei_nal);
+    result.extend_from_slice(&access_unit[insertion_point..]);
+
+    Some(result)
+}
+
+/// State tracker for Picture Timing SEI injection.
+#[derive(Debug, Clone)]
+pub struct PicTimingState {
+    /// The start timestamp from CLI
+    pub start_timestamp: ClockTimestamp,
+    /// VUI timing parameters from SPS
+    pub vui_params: VuiTimingParams,
+    /// PTS of the first keyframe (for calculating offsets)
+    pub first_keyframe_pts: Option<u64>,
+    /// Whether we've seen an SPS and extracted VUI
+    pub vui_extracted: bool,
+}
+
+impl PicTimingState {
+    /// Create a new Picture Timing state with the given start timestamp.
+    pub fn new(start_timestamp: ClockTimestamp) -> Self {
+        Self {
+            start_timestamp,
+            vui_params: VuiTimingParams::default(),
+            first_keyframe_pts: None,
+            vui_extracted: false,
+        }
+    }
+
+    /// Update VUI parameters from an SPS if found in the data.
+    pub fn try_extract_vui(&mut self, data: &[u8]) {
+        if self.vui_extracted {
+            return;
+        }
+        if let Some(vui) = extract_vui_from_access_unit(data) {
+            self.vui_params = vui;
+            self.vui_extracted = true;
+        }
+    }
+
+    /// Calculate the clock timestamp for a keyframe at the given PTS.
+    pub fn timestamp_for_pts(&mut self, pts: u64) -> ClockTimestamp {
+        let first_pts = *self.first_keyframe_pts.get_or_insert(pts);
+        let pts_delta = pts.saturating_sub(first_pts);
+        self.start_timestamp
+            .add_pts_ticks(pts_delta, self.vui_params.frame_rate())
+    }
+
+    /// Build a Picture Timing SEI NAL unit for the given PTS.
+    pub fn build_sei_for_pts(&mut self, pts: u64) -> Vec<u8> {
+        let timestamp = self.timestamp_for_pts(pts);
+        let sei = PicTimingSei::new(timestamp);
+        sei.build_sei_nal(&self.vui_params)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1186,5 +1262,69 @@ mod tests {
         let result = ts.add_pts_ticks(135_000, 30.0);
         assert_eq!(result.seconds, 1);
         assert_eq!(result.n_frames, 15); // 0.5s at 30fps = 15 frames
+    }
+
+    #[test]
+    fn test_inject_sei_into_access_unit() {
+        // Access unit with SPS + IDR
+        let access_unit = vec![
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x11, // SPS
+            0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, // IDR
+        ];
+        // Simple SEI NAL
+        let sei_nal = vec![0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x02, 0x80];
+
+        let result = inject_sei_into_access_unit(&access_unit, &sei_nal).unwrap();
+
+        // SEI should be inserted between SPS and IDR
+        assert_eq!(result.len(), access_unit.len() + sei_nal.len());
+        // First 6 bytes are SPS
+        assert_eq!(&result[0..6], &access_unit[0..6]);
+        // Next 8 bytes are SEI
+        assert_eq!(&result[6..14], &sei_nal[..]);
+        // Last 6 bytes are IDR
+        assert_eq!(&result[14..], &access_unit[6..]);
+    }
+
+    #[test]
+    fn test_inject_sei_no_slice() {
+        // Access unit with only SPS, no slice
+        let access_unit = vec![0x00, 0x00, 0x00, 0x01, 0x67, 0x11];
+        let sei_nal = vec![0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x02, 0x80];
+
+        // Should return None since there's no slice
+        assert!(inject_sei_into_access_unit(&access_unit, &sei_nal).is_none());
+    }
+
+    #[test]
+    fn test_pic_timing_state_basic() {
+        let start_ts = ClockTimestamp::new(18, 0, 0, 0);
+        let mut state = PicTimingState::new(start_ts);
+
+        // First keyframe at PTS 0
+        let ts1 = state.timestamp_for_pts(0);
+        assert_eq!(ts1.hours, 18);
+        assert_eq!(ts1.minutes, 0);
+        assert_eq!(ts1.seconds, 0);
+
+        // Second keyframe at PTS 90000 (1 second later)
+        let ts2 = state.timestamp_for_pts(90_000);
+        assert_eq!(ts2.hours, 18);
+        assert_eq!(ts2.minutes, 0);
+        assert_eq!(ts2.seconds, 1);
+    }
+
+    #[test]
+    fn test_pic_timing_state_build_sei() {
+        let start_ts = ClockTimestamp::new(12, 0, 0, 0);
+        let mut state = PicTimingState::new(start_ts);
+
+        let sei = state.build_sei_for_pts(0);
+
+        // Verify it's a valid SEI NAL
+        assert!(sei.len() >= 8);
+        assert_eq!(&sei[0..4], &[0x00, 0x00, 0x00, 0x01]); // Start code
+        assert_eq!(sei[4], NAL_TYPE_SEI);                   // NAL type 6
+        assert_eq!(sei[5], SEI_TYPE_PIC_TIMING);            // Payload type 1
     }
 }
