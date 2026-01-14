@@ -4,9 +4,11 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use scte35_injector::{
-    ProbeHints, inject::inject_file, inject::inject_file_with_pic_timing,
-    parse_cue_arg, probe_ts,
+    ProbeHints,
     h264::{ClockTimestamp, PicTimingState, find_nal_units},
+    inject::inject_file,
+    inject::inject_file_with_pic_timing,
+    parse_cue_arg, probe_ts,
 };
 
 // End-to-end on provided fixture. Skips if fixture missing.

@@ -1,9 +1,9 @@
+use crate::h264::{PicTimingState, contains_idr, inject_sei_into_access_unit};
 use crate::{
     Continuity, Cue, PesAccumulator, ProbeHints, allocate_pid, build_pmt_with_scte35,
     choose_insertion_packet, duration_to_pts, packetize_payload, packetize_pmt, packetize_scte35,
     pes_h264_payload, probe_ts, rebuild_pes_with_payload,
 };
-use crate::h264::{PicTimingState, contains_idr, inject_sei_into_access_unit};
 use anyhow::{Context, Result, anyhow};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -187,7 +187,10 @@ pub fn inject_file_with_pic_timing(
     }
 
     if sei_injection_count > 0 {
-        info!("Injected Picture Timing SEI into {} keyframes", sei_injection_count);
+        info!(
+            "Injected Picture Timing SEI into {} keyframes",
+            sei_injection_count
+        );
     }
 
     writer.flush()?;

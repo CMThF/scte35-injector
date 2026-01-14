@@ -307,7 +307,10 @@ pub fn parse_sps_vui_timing(sps_data: &[u8]) -> Option<VuiTimingParams> {
     let timing = vui.timing_info.as_ref()?;
 
     // Get HRD parameters (prefer NAL HRD, fall back to VCL HRD)
-    let hrd = vui.nal_hrd_parameters.as_ref().or(vui.vcl_hrd_parameters.as_ref());
+    let hrd = vui
+        .nal_hrd_parameters
+        .as_ref()
+        .or(vui.vcl_hrd_parameters.as_ref());
 
     Some(VuiTimingParams {
         cpb_dpb_delays_present: hrd.is_some(),
@@ -371,9 +374,7 @@ impl PicStruct {
     pub fn num_clock_ts(self) -> u8 {
         match self {
             PicStruct::Frame | PicStruct::TopField | PicStruct::BottomField => 1,
-            PicStruct::TopBottomField
-            | PicStruct::BottomTopField
-            | PicStruct::FrameDoubling => 2,
+            PicStruct::TopBottomField | PicStruct::BottomTopField | PicStruct::FrameDoubling => 2,
             PicStruct::TopBottomTop | PicStruct::BottomTopBottom | PicStruct::FrameTripling => 3,
         }
     }
@@ -420,7 +421,10 @@ impl ClockTimestamp {
     pub fn from_time_str(s: &str, frame_rate: f64) -> Result<Self, String> {
         let parts: Vec<&str> = s.split(':').collect();
         if parts.len() != 3 {
-            return Err(format!("Invalid time format '{}', expected HH:MM:SS.mmm", s));
+            return Err(format!(
+                "Invalid time format '{}', expected HH:MM:SS.mmm",
+                s
+            ));
         }
 
         let hours: u8 = parts[0]
@@ -572,7 +576,7 @@ impl Default for VuiTimingParams {
             dpb_output_delay_length: 24,
             pic_struct_present: true,
             time_offset_length: 0,
-            time_scale: 60000,      // 29.97fps default
+            time_scale: 60000, // 29.97fps default
             num_units_in_tick: 1001,
         }
     }
@@ -689,10 +693,7 @@ impl PicTimingSei {
 /// Returns the modified access unit data with SEI injected.
 ///
 /// Returns None if the access unit doesn't contain a slice.
-pub fn inject_sei_into_access_unit(
-    access_unit: &[u8],
-    sei_nal: &[u8],
-) -> Option<Vec<u8>> {
+pub fn inject_sei_into_access_unit(access_unit: &[u8], sei_nal: &[u8]) -> Option<Vec<u8>> {
     let insertion_point = find_sei_insertion_point(access_unit);
 
     // If insertion point is at the end, there's no slice - don't inject
@@ -855,7 +856,10 @@ mod tests {
         let rbsp = vec![0x00, 0x00, 0x00, 0x00, 0x01];
         // First 0x00 0x00 0x00 -> 0x00 0x00 0x03 0x00
         // Then 0x00 0x01 (not escaped, only one zero before)
-        assert_eq!(rbsp_to_nal(&rbsp), vec![0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x01]);
+        assert_eq!(
+            rbsp_to_nal(&rbsp),
+            vec![0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x01]
+        );
     }
 
     #[test]
@@ -1138,8 +1142,8 @@ mod tests {
             0x67, // NAL header: SPS
             0x64, 0x00, 0x28, // profile_idc=100 (High), constraint_flags, level_idc=40
             0xAD, 0x00, 0xB4, 0x01, 0x77, 0xE8, // SPS params
-            0x01, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x03, 0x00,
-            0x3C, 0x8F, 0x16, 0x2E, 0x48, // VUI with timing_info
+            0x01, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x03, 0x00, 0x3C, 0x8F, 0x16, 0x2E,
+            0x48, // VUI with timing_info
         ];
 
         // Note: This test may fail if the SPS is malformed. The important thing
@@ -1307,7 +1311,7 @@ mod tests {
         // Verify it's a valid SEI NAL
         assert!(sei.len() >= 8);
         assert_eq!(&sei[0..4], &[0x00, 0x00, 0x00, 0x01]); // Start code
-        assert_eq!(sei[4], NAL_TYPE_SEI);                   // NAL type 6
-        assert_eq!(sei[5], SEI_TYPE_PIC_TIMING);            // Payload type 1
+        assert_eq!(sei[4], NAL_TYPE_SEI); // NAL type 6
+        assert_eq!(sei[5], SEI_TYPE_PIC_TIMING); // Payload type 1
     }
 }

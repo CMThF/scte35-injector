@@ -4,8 +4,11 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 use scte35_injector::{
-    Cue, ProbeHints, inject::inject_file_with_pic_timing, list::list_scte35_cues, parse_cue_arg,
+    Cue, ProbeHints,
     h264::{ClockTimestamp, PicTimingState},
+    inject::inject_file_with_pic_timing,
+    list::list_scte35_cues,
+    parse_cue_arg,
 };
 
 /// Inject SCTE-35 cues into an MPEG-TS file.
@@ -103,7 +106,10 @@ fn main() -> Result<()> {
         let default_frame_rate = 29.97;
         let start_ts = ClockTimestamp::from_time_str(time_str, default_frame_rate)
             .map_err(|e| anyhow::anyhow!("Invalid pic-timing-start: {}", e))?;
-        info!("Picture Timing SEI injection enabled, start time: {}", time_str);
+        info!(
+            "Picture Timing SEI injection enabled, start time: {}",
+            time_str
+        );
         Some(PicTimingState::new(start_ts))
     } else {
         None
