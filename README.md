@@ -13,22 +13,31 @@ MPEG-TS CLI tool to detect, insert, and list SCTE-35 cues. Think of it as a ligh
 - **Auto-add SCTE-35 PID**: If none exists, allocate one, rewrite PMT (CRC-correct, with CUEI reg descriptor), and update continuity.
 - **Continuity-safe**: Maintains continuity counters for all PIDs it touches.
 - **List cues**: Finds cues via PMT, PSI sections (`table_id 0xFC`), or PES (`stream_id 0xFC`); reports PTS and base64.
+- **Picture Timing SEI**: Inject H.264 Picture Timing SEI messages on video keyframes with incrementing timestamps.
 - **Streaming**: Processes TS incrementally; no full-file buffering.
 - **Well-tested**: Unit, edge, and end-to-end tests (fixtures in `test-assets/`).
 
 ## Quickstart
 
 ```bash
-cargo run -- --input test-assets/tears_of_steel_1080p.ts \
+scte35-injector --input test-assets/tears_of_steel_1080p.ts \
   --output /tmp/out.ts \
   --cue "00:00:25.000@00:00:30.000=/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A=="
 ```
 Places packets at 25s and rewrites `splice_time` to 30s inside the cue. Omit `@...` to keep the original splice time.
 
+Inject Picture Timing SEI on all keyframes starting at 18:00:00:
+
+```bash
+scte35-injector --input test-assets/tears_of_steel_1080p.ts \
+  --output /tmp/out.ts \
+  --pic-timing-start "18:00:00.000"
+```
+
 List cues in a stream:
 
 ```bash
-cargo run -- --input test-assets/scte35_splice_inserts_with_auto_return.ts --list-cues
+scte35-injector --input test-assets/scte35_splice_inserts_with_auto_return.ts --list-cues
 ```
 
 ## CLI
@@ -45,6 +54,7 @@ Options:
       --pcr-pid <PCR_PID>       Optional PCR PID hint
       --video-pid <VIDEO_PID>   Optional video PID hint (timing reference)
       --list-cues               List SCTE-35 cues present in the input, then exit
+      --pic-timing-start <TIME> Start time for Picture Timing SEI injection (HH:MM:SS.mmm)
   -h, --help                    Print help
   -V, --version                 Print version
 ```
@@ -59,6 +69,24 @@ On inject:
 - Payload is validated; if `@splice` is provided, the cue is re-encoded with the new `splice_time` (33-bit wrap respected).
 - Packets are placed at the nearest packet at/before the target PTS derived from the reference timeline.
 
+## Picture Timing SEI
+
+The `--pic-timing-start` option injects H.264 Picture Timing SEI messages (ITU-T H.264 Annex D.2.2) into the video stream:
+
+- **When**: SEI is injected on every video keyframe (IDR NAL unit).
+- **Format**: `HH:MM:SS.mmm` — hours, minutes, seconds, milliseconds.
+- **Timing**: The start time is used for the first keyframe. Subsequent keyframes receive timestamps incremented based on PTS delta from the first keyframe.
+- **VUI extraction**: If the video SPS contains VUI timing parameters (`time_scale`, `num_units_in_tick`), they are used for accurate frame rate calculation. Otherwise defaults to 29.97fps.
+- **Milliseconds to frames**: Milliseconds are converted to `n_frames` based on the detected or default frame rate.
+
+Example combining SCTE-35 cues with Picture Timing SEI:
+
+```bash
+scte35-injector --input input.ts --output output.ts \
+  --pic-timing-start "18:00:00.000" \
+  --cue "00:00:10.000=/DAWAAAAAAAAAP/wBQb+Qjo1vQAAuwxz9A=="
+```
+
 ## Behavior and assumptions
 
 - Single-program TS expected. PMT rewrite handles one PMT; multi-PMT not yet supported.
@@ -71,9 +99,10 @@ On inject:
 ## Project layout
 
 - `src/main.rs`          CLI entry.
-- `src/lib.rs`           Core parsing, packetization, PID allocation, timing helpers.
+- `src/lib.rs`           Core parsing, packetization, PID allocation, timing helpers, PES handling.
 - `src/inject.rs`        Injection pipeline (probe → plan → packetize → write).
 - `src/list.rs`          Cue listing pipeline.
+- `src/h264.rs`          H.264 NAL parsing, Picture Timing SEI encoding, VUI extraction.
 - `test-assets/`         Sample TS fixtures.
 
 ## Testing

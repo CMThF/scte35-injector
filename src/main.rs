@@ -4,7 +4,11 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 use scte35_injector::{
-    Cue, ProbeHints, inject::inject_file, list::list_scte35_cues, parse_cue_arg,
+    Cue, ProbeHints,
+    h264::{ClockTimestamp, PicTimingState},
+    inject::inject_file_with_pic_timing,
+    list::list_scte35_cues,
+    parse_cue_arg,
 };
 
 /// Inject SCTE-35 cues into an MPEG-TS file.
@@ -39,6 +43,11 @@ struct Cli {
     /// List SCTE-35 cues found in the input and exit (no injection).
     #[arg(long = "list-cues")]
     list_cues: bool,
+
+    /// Start time for Picture Timing SEI injection (format: HH:MM:SS.mmm).
+    /// When set, injects Picture Timing SEI on video keyframes with incrementing timestamps.
+    #[arg(long = "pic-timing-start")]
+    pic_timing_start: Option<String>,
 }
 
 fn init_tracing() {
@@ -81,8 +90,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if cli.cues.is_empty() {
-        warn!("No cues provided; the tool will exit without modifications.");
+    if cli.cues.is_empty() && cli.pic_timing_start.is_none() {
+        warn!("No cues or pic-timing-start provided; the tool will exit without modifications.");
     }
 
     let parsed_cues: Vec<Cue> = cli
@@ -90,6 +99,21 @@ fn main() -> Result<()> {
         .iter()
         .map(|c| parse_cue_arg(c))
         .collect::<Result<Vec<_>>>()?;
+
+    // Parse Picture Timing start time if provided
+    let pic_timing = if let Some(ref time_str) = cli.pic_timing_start {
+        // Use a default frame rate; will be updated from SPS if available
+        let default_frame_rate = 29.97;
+        let start_ts = ClockTimestamp::from_time_str(time_str, default_frame_rate)
+            .map_err(|e| anyhow::anyhow!("Invalid pic-timing-start: {}", e))?;
+        info!(
+            "Picture Timing SEI injection enabled, start time: {}",
+            time_str
+        );
+        Some(PicTimingState::new(start_ts))
+    } else {
+        None
+    };
 
     let output = cli
         .output
@@ -103,7 +127,7 @@ fn main() -> Result<()> {
         output.display()
     );
 
-    inject_file(&cli.input, output, &parsed_cues, hints)?;
+    inject_file_with_pic_timing(&cli.input, output, &parsed_cues, hints, pic_timing)?;
     info!("Finished writing {}", output.display());
 
     Ok(())

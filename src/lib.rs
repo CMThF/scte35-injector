@@ -57,6 +57,7 @@ pub fn parse_cue_arg(raw: &str) -> Result<Cue> {
     })
 }
 
+pub mod h264;
 pub mod inject;
 pub mod list;
 
@@ -609,7 +610,8 @@ fn packetize_section(section: &[u8], pid: u16, cc: &mut Continuity) -> Result<Ve
     packetize_payload(pid, true, &data, cc)
 }
 
-fn packetize_payload(
+/// Make packetize_payload public so inject.rs can use it.
+pub fn packetize_payload(
     pid: u16,
     payload_unit_start: bool,
     payload: &[u8],
@@ -657,6 +659,99 @@ fn packetize_payload(
         first = false;
     }
     Ok(packets)
+}
+
+// --- PES Handling for Video SEI Injection ---------------------------------
+
+/// Accumulates TS packets to reassemble a complete PES packet.
+#[derive(Default)]
+pub struct PesAccumulator {
+    buf: Vec<u8>,
+    pts: Option<u64>,
+}
+
+impl PesAccumulator {
+    /// Push TS packet payload into accumulator.
+    /// Returns the completed PES data and PTS if a new PES starts (PUSI=1).
+    pub fn push(&mut self, payload_start: bool, payload: &[u8]) -> Option<(Vec<u8>, Option<u64>)> {
+        if payload_start {
+            // New PES starting - return previous if any
+            let prev = if !self.buf.is_empty() {
+                Some((std::mem::take(&mut self.buf), self.pts.take()))
+            } else {
+                None
+            };
+
+            // Start accumulating new PES
+            self.buf.extend_from_slice(payload);
+            self.pts = parse_pes_pts(&self.buf);
+            prev
+        } else {
+            // Continue accumulating current PES
+            self.buf.extend_from_slice(payload);
+            None
+        }
+    }
+
+    /// Flush any remaining accumulated data.
+    pub fn flush(&mut self) -> Option<(Vec<u8>, Option<u64>)> {
+        if !self.buf.is_empty() {
+            Some((std::mem::take(&mut self.buf), self.pts.take()))
+        } else {
+            None
+        }
+    }
+}
+
+/// Get the PES header length (includes start code, stream_id, length, flags, optional fields).
+pub fn pes_header_len(pes: &[u8]) -> Option<usize> {
+    if pes.len() < 9 {
+        return None;
+    }
+    if pes[0] != 0x00 || pes[1] != 0x00 || pes[2] != 0x01 {
+        return None;
+    }
+    let header_data_length = pes[8] as usize;
+    Some(9 + header_data_length)
+}
+
+/// Rebuild a PES packet with modified payload.
+/// Preserves the original PES header but updates the length field if needed.
+pub fn rebuild_pes_with_payload(original_pes: &[u8], new_payload: &[u8]) -> Option<Vec<u8>> {
+    let header_len = pes_header_len(original_pes)?;
+    if header_len > original_pes.len() {
+        return None;
+    }
+
+    let mut result = Vec::with_capacity(header_len + new_payload.len());
+    result.extend_from_slice(&original_pes[..header_len]);
+    result.extend_from_slice(new_payload);
+
+    // Update PES packet length if it was specified (non-zero)
+    let original_length = ((original_pes[4] as usize) << 8) | (original_pes[5] as usize);
+    if original_length != 0 {
+        // New length = header bytes after length field + new payload
+        let new_length = (header_len - 6) + new_payload.len();
+        if new_length <= 0xFFFF {
+            result[4] = (new_length >> 8) as u8;
+            result[5] = (new_length & 0xFF) as u8;
+        } else {
+            // Length too large, set to 0 (unbounded)
+            result[4] = 0;
+            result[5] = 0;
+        }
+    }
+
+    Some(result)
+}
+
+/// Extract the H.264 payload from a PES packet (after PES header).
+pub fn pes_h264_payload(pes: &[u8]) -> Option<&[u8]> {
+    let header_len = pes_header_len(pes)?;
+    if header_len >= pes.len() {
+        return None;
+    }
+    Some(&pes[header_len..])
 }
 
 // --- Tests ----------------------------------------------------------------
