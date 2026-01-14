@@ -119,10 +119,163 @@ pub fn nal_to_rbsp(nal: &[u8]) -> Vec<u8> {
 }
 
 // NAL unit types
+pub const NAL_TYPE_NON_IDR_SLICE: u8 = 1;
+pub const NAL_TYPE_SLICE_PART_A: u8 = 2;
+pub const NAL_TYPE_SLICE_PART_B: u8 = 3;
+pub const NAL_TYPE_SLICE_PART_C: u8 = 4;
+pub const NAL_TYPE_IDR_SLICE: u8 = 5;
 pub const NAL_TYPE_SEI: u8 = 6;
+pub const NAL_TYPE_SPS: u8 = 7;
+pub const NAL_TYPE_PPS: u8 = 8;
+pub const NAL_TYPE_AUD: u8 = 9;
 
 // SEI payload types
 pub const SEI_TYPE_PIC_TIMING: u8 = 1;
+
+/// Information about a NAL unit found in a byte stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NalUnit {
+    /// Offset of start code in the buffer
+    pub start_code_offset: usize,
+    /// Length of start code (3 or 4 bytes)
+    pub start_code_len: usize,
+    /// NAL unit type (lower 5 bits of NAL header)
+    pub nal_type: u8,
+    /// NAL ref IDC (bits 5-6 of NAL header)
+    pub nal_ref_idc: u8,
+    /// Offset of NAL unit data (after header byte)
+    pub data_offset: usize,
+    /// Length of NAL unit data (until next start code or end)
+    pub data_len: usize,
+}
+
+impl NalUnit {
+    /// Returns true if this NAL unit is an IDR (keyframe).
+    pub fn is_idr(&self) -> bool {
+        self.nal_type == NAL_TYPE_IDR_SLICE
+    }
+
+    /// Returns true if this NAL unit is a slice (IDR or non-IDR).
+    pub fn is_slice(&self) -> bool {
+        matches!(
+            self.nal_type,
+            NAL_TYPE_NON_IDR_SLICE
+                | NAL_TYPE_SLICE_PART_A
+                | NAL_TYPE_SLICE_PART_B
+                | NAL_TYPE_SLICE_PART_C
+                | NAL_TYPE_IDR_SLICE
+        )
+    }
+
+    /// Returns true if this is an Access Unit Delimiter.
+    pub fn is_aud(&self) -> bool {
+        self.nal_type == NAL_TYPE_AUD
+    }
+
+    /// Returns true if this is an SPS.
+    pub fn is_sps(&self) -> bool {
+        self.nal_type == NAL_TYPE_SPS
+    }
+
+    /// Returns true if this is a PPS.
+    pub fn is_pps(&self) -> bool {
+        self.nal_type == NAL_TYPE_PPS
+    }
+
+    /// Returns true if this is an SEI.
+    pub fn is_sei(&self) -> bool {
+        self.nal_type == NAL_TYPE_SEI
+    }
+}
+
+/// Find all NAL units in an Annex B byte stream.
+///
+/// Scans for start codes (0x000001 or 0x00000001) and returns information
+/// about each NAL unit found.
+pub fn find_nal_units(data: &[u8]) -> Vec<NalUnit> {
+    let mut units = Vec::new();
+    let mut i = 0;
+
+    while i < data.len() {
+        // Look for start code
+        if let Some((start_code_len, header_offset)) = find_start_code(&data[i..]) {
+            let nal_header_pos = i + header_offset;
+            if nal_header_pos >= data.len() {
+                break;
+            }
+
+            let nal_header = data[nal_header_pos];
+            let nal_type = nal_header & 0x1F;
+            let nal_ref_idc = (nal_header >> 5) & 0x03;
+
+            // Find the end of this NAL unit (next start code or end of data)
+            let data_start = nal_header_pos + 1;
+            let mut data_end = data.len();
+
+            let mut j = data_start;
+            while j < data.len() {
+                if let Some((_, _)) = find_start_code(&data[j..]) {
+                    data_end = j;
+                    break;
+                }
+                j += 1;
+            }
+
+            units.push(NalUnit {
+                start_code_offset: i,
+                start_code_len,
+                nal_type,
+                nal_ref_idc,
+                data_offset: data_start,
+                data_len: data_end - data_start,
+            });
+
+            i = data_end;
+        } else {
+            i += 1;
+        }
+    }
+
+    units
+}
+
+/// Find a start code at the beginning of the data slice.
+/// Returns (start_code_length, offset_to_nal_header) if found.
+fn find_start_code(data: &[u8]) -> Option<(usize, usize)> {
+    if data.len() >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1 {
+        Some((4, 4))
+    } else if data.len() >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1 {
+        Some((3, 3))
+    } else {
+        None
+    }
+}
+
+/// Check if an H.264 access unit (collection of NAL units) contains an IDR.
+pub fn contains_idr(data: &[u8]) -> bool {
+    find_nal_units(data).iter().any(|n| n.is_idr())
+}
+
+/// Find the best insertion point for an SEI NAL unit in an access unit.
+///
+/// Returns the byte offset where the SEI should be inserted.
+/// SEI should be inserted:
+/// - After AUD (if present)
+/// - After SPS/PPS (if present)
+/// - Before slice NAL units
+pub fn find_sei_insertion_point(data: &[u8]) -> usize {
+    let units = find_nal_units(data);
+
+    // Find the first slice NAL unit
+    for unit in &units {
+        if unit.is_slice() {
+            return unit.start_code_offset;
+        }
+    }
+
+    // No slice found, insert at end
+    data.len()
+}
 
 /// Picture structure values for pic_timing SEI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -622,5 +775,114 @@ mod tests {
         let payload = sei.encode_payload(&vui);
         // Minimal payload: 4 bits pic_struct + 1 bit flag + 1 bit trailing + padding
         assert!(!payload.is_empty());
+    }
+
+    #[test]
+    fn test_find_nal_units_single_idr() {
+        // IDR NAL with 4-byte start code: 00 00 00 01 65 (type 5, ref_idc 3)
+        let data = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB];
+        let units = find_nal_units(&data);
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].start_code_offset, 0);
+        assert_eq!(units[0].start_code_len, 4);
+        assert_eq!(units[0].nal_type, NAL_TYPE_IDR_SLICE);
+        assert_eq!(units[0].nal_ref_idc, 3);
+        assert!(units[0].is_idr());
+        assert!(units[0].is_slice());
+    }
+
+    #[test]
+    fn test_find_nal_units_3byte_start_code() {
+        // Non-IDR slice with 3-byte start code: 00 00 01 41 (type 1, ref_idc 2)
+        let data = vec![0x00, 0x00, 0x01, 0x41, 0xCC];
+        let units = find_nal_units(&data);
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].start_code_len, 3);
+        assert_eq!(units[0].nal_type, NAL_TYPE_NON_IDR_SLICE);
+        assert!(!units[0].is_idr());
+        assert!(units[0].is_slice());
+    }
+
+    #[test]
+    fn test_find_nal_units_multiple() {
+        // SPS + PPS + IDR
+        let data = vec![
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x11, 0x22, // SPS (type 7)
+            0x00, 0x00, 0x00, 0x01, 0x68, 0x33, // PPS (type 8)
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x44, 0x55, // IDR (type 5)
+        ];
+        let units = find_nal_units(&data);
+
+        assert_eq!(units.len(), 3);
+        assert!(units[0].is_sps());
+        assert!(units[1].is_pps());
+        assert!(units[2].is_idr());
+    }
+
+    #[test]
+    fn test_find_nal_units_with_aud() {
+        // AUD + IDR
+        let data = vec![
+            0x00, 0x00, 0x00, 0x01, 0x09, 0xF0, // AUD (type 9)
+            0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, // IDR (type 5)
+        ];
+        let units = find_nal_units(&data);
+
+        assert_eq!(units.len(), 2);
+        assert!(units[0].is_aud());
+        assert!(units[1].is_idr());
+    }
+
+    #[test]
+    fn test_contains_idr_true() {
+        let data = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0xAA];
+        assert!(contains_idr(&data));
+    }
+
+    #[test]
+    fn test_contains_idr_false() {
+        let data = vec![0x00, 0x00, 0x00, 0x01, 0x41, 0xAA]; // Non-IDR
+        assert!(!contains_idr(&data));
+    }
+
+    #[test]
+    fn test_find_sei_insertion_point_before_slice() {
+        // SPS + PPS + IDR -> insert before IDR
+        let data = vec![
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x11, // SPS
+            0x00, 0x00, 0x00, 0x01, 0x68, 0x22, // PPS
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x33, // IDR
+        ];
+        let point = find_sei_insertion_point(&data);
+        // Should point to the start of IDR NAL
+        assert_eq!(point, 12); // After SPS and PPS
+    }
+
+    #[test]
+    fn test_find_sei_insertion_point_with_aud() {
+        // AUD + IDR -> insert before IDR (after AUD)
+        let data = vec![
+            0x00, 0x00, 0x00, 0x01, 0x09, 0xF0, // AUD
+            0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, // IDR
+        ];
+        let point = find_sei_insertion_point(&data);
+        assert_eq!(point, 6); // After AUD
+    }
+
+    #[test]
+    fn test_nal_unit_methods() {
+        let sei_unit = NalUnit {
+            start_code_offset: 0,
+            start_code_len: 4,
+            nal_type: NAL_TYPE_SEI,
+            nal_ref_idc: 0,
+            data_offset: 5,
+            data_len: 10,
+        };
+        assert!(sei_unit.is_sei());
+        assert!(!sei_unit.is_slice());
+        assert!(!sei_unit.is_idr());
     }
 }
