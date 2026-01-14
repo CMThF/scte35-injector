@@ -489,15 +489,11 @@ impl ClockTimestamp {
     /// Add seconds to this timestamp, returning a new timestamp.
     ///
     /// Handles overflow into minutes, hours, and 24-hour wrap.
-    pub fn add_seconds(&self, seconds_to_add: u64, frame_rate: f64) -> Self {
+    pub fn add_seconds(&self, seconds_to_add: u64, _frame_rate: f64) -> Self {
         let total_seconds = self.hours as u64 * 3600
             + self.minutes as u64 * 60
             + self.seconds as u64
             + seconds_to_add;
-
-        // Calculate frames from the fractional part
-        let frames_per_second = frame_rate.ceil() as u64;
-        let total_frames = self.n_frames as u64;
 
         // Wrap at 24 hours
         let wrapped_seconds = total_seconds % (24 * 3600);
@@ -505,17 +501,13 @@ impl ClockTimestamp {
         let hours = ((wrapped_seconds / 3600) % 24) as u8;
         let minutes = ((wrapped_seconds % 3600) / 60) as u8;
         let seconds = (wrapped_seconds % 60) as u8;
-        let n_frames = if frames_per_second > 0 {
-            (total_frames % frames_per_second) as u8
-        } else {
-            0
-        };
 
+        // n_frames remains unchanged when adding whole seconds
         Self {
             hours,
             minutes,
             seconds,
-            n_frames,
+            n_frames: self.n_frames,
             ..self.clone()
         }
     }
@@ -1244,6 +1236,15 @@ mod tests {
         assert_eq!(result.hours, 0); // Wrapped to next day
         assert_eq!(result.minutes, 0);
         assert_eq!(result.seconds, 30);
+    }
+
+    #[test]
+    fn test_clock_timestamp_add_seconds_preserves_n_frames() {
+        // n_frames should remain unchanged when adding whole seconds
+        let ts = ClockTimestamp::new(0, 0, 10, 15); // 15 frames into the second
+        let result = ts.add_seconds(5, 30.0);
+        assert_eq!(result.seconds, 15);
+        assert_eq!(result.n_frames, 15); // Must be preserved
     }
 
     #[test]
