@@ -67,6 +67,57 @@ impl BitWriter {
     }
 }
 
+/// Insert emulation prevention bytes into RBSP data to create NAL unit payload.
+///
+/// H.264 requires that byte sequences 0x000000, 0x000001, 0x000002, and 0x000003
+/// be escaped by inserting 0x03 after the two 0x00 bytes:
+/// - 0x00 0x00 0x00 -> 0x00 0x00 0x03 0x00
+/// - 0x00 0x00 0x01 -> 0x00 0x00 0x03 0x01
+/// - 0x00 0x00 0x02 -> 0x00 0x00 0x03 0x02
+/// - 0x00 0x00 0x03 -> 0x00 0x00 0x03 0x03
+pub fn rbsp_to_nal(rbsp: &[u8]) -> Vec<u8> {
+    let mut nal = Vec::with_capacity(rbsp.len() + rbsp.len() / 256);
+    let mut zero_count = 0;
+
+    for &byte in rbsp {
+        if zero_count >= 2 && byte <= 0x03 {
+            // Insert emulation prevention byte
+            nal.push(0x03);
+            zero_count = 0;
+        }
+        nal.push(byte);
+        if byte == 0x00 {
+            zero_count += 1;
+        } else {
+            zero_count = 0;
+        }
+    }
+
+    nal
+}
+
+/// Remove emulation prevention bytes from NAL unit payload to get RBSP data.
+///
+/// This reverses the transformation done by `rbsp_to_nal`.
+pub fn nal_to_rbsp(nal: &[u8]) -> Vec<u8> {
+    let mut rbsp = Vec::with_capacity(nal.len());
+    let mut i = 0;
+
+    while i < nal.len() {
+        if i + 2 < nal.len() && nal[i] == 0x00 && nal[i + 1] == 0x00 && nal[i + 2] == 0x03 {
+            // Found emulation prevention byte sequence
+            rbsp.push(0x00);
+            rbsp.push(0x00);
+            i += 3; // Skip the 0x03 emulation prevention byte
+        } else {
+            rbsp.push(nal[i]);
+            i += 1;
+        }
+    }
+
+    rbsp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +177,70 @@ mod tests {
     fn test_bitwriter_empty() {
         let bw = BitWriter::new();
         assert_eq!(bw.into_bytes(), vec![]);
+    }
+
+    #[test]
+    fn test_rbsp_to_nal_no_escape_needed() {
+        let rbsp = vec![0x01, 0x02, 0x03, 0x04];
+        assert_eq!(rbsp_to_nal(&rbsp), rbsp);
+    }
+
+    #[test]
+    fn test_rbsp_to_nal_escape_000000() {
+        let rbsp = vec![0x00, 0x00, 0x00];
+        assert_eq!(rbsp_to_nal(&rbsp), vec![0x00, 0x00, 0x03, 0x00]);
+    }
+
+    #[test]
+    fn test_rbsp_to_nal_escape_000001() {
+        let rbsp = vec![0x00, 0x00, 0x01];
+        assert_eq!(rbsp_to_nal(&rbsp), vec![0x00, 0x00, 0x03, 0x01]);
+    }
+
+    #[test]
+    fn test_rbsp_to_nal_escape_000002() {
+        let rbsp = vec![0x00, 0x00, 0x02];
+        assert_eq!(rbsp_to_nal(&rbsp), vec![0x00, 0x00, 0x03, 0x02]);
+    }
+
+    #[test]
+    fn test_rbsp_to_nal_escape_000003() {
+        let rbsp = vec![0x00, 0x00, 0x03];
+        assert_eq!(rbsp_to_nal(&rbsp), vec![0x00, 0x00, 0x03, 0x03]);
+    }
+
+    #[test]
+    fn test_rbsp_to_nal_multiple_escapes() {
+        let rbsp = vec![0x00, 0x00, 0x00, 0x00, 0x01];
+        // First 0x00 0x00 0x00 -> 0x00 0x00 0x03 0x00
+        // Then 0x00 0x01 (not escaped, only one zero before)
+        assert_eq!(rbsp_to_nal(&rbsp), vec![0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x01]);
+    }
+
+    #[test]
+    fn test_rbsp_to_nal_no_escape_at_04() {
+        let rbsp = vec![0x00, 0x00, 0x04];
+        // 0x04 is not escaped
+        assert_eq!(rbsp_to_nal(&rbsp), vec![0x00, 0x00, 0x04]);
+    }
+
+    #[test]
+    fn test_nal_to_rbsp_no_escape() {
+        let nal = vec![0x01, 0x02, 0x03, 0x04];
+        assert_eq!(nal_to_rbsp(&nal), nal);
+    }
+
+    #[test]
+    fn test_nal_to_rbsp_removes_emulation_prevention() {
+        let nal = vec![0x00, 0x00, 0x03, 0x00];
+        assert_eq!(nal_to_rbsp(&nal), vec![0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_rbsp_nal_roundtrip() {
+        let original = vec![0x00, 0x00, 0x01, 0x67, 0x00, 0x00, 0x03, 0x00, 0x00, 0x02];
+        let nal = rbsp_to_nal(&original);
+        let rbsp = nal_to_rbsp(&nal);
+        assert_eq!(rbsp, original);
     }
 }
