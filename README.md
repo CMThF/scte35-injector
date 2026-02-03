@@ -1,5 +1,8 @@
 # scte35-injector
 
+[![CI](https://github.com/CMThF/scte35-injector/actions/workflows/ci.yml/badge.svg)](https://github.com/CMThF/scte35-injector/actions/workflows/ci.yml)
+[![Release](https://github.com/CMThF/scte35-injector/actions/workflows/release.yml/badge.svg)](https://github.com/CMThF/scte35-injector/actions/workflows/release.yml)
+
 MPEG-TS CLI tool to detect, insert, and list SCTE-35 cues. Think of it as a lightweight shorthand alternative to common TSDuck workflows for SCTE-35.
 
 ## Disclaimer
