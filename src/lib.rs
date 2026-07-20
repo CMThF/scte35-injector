@@ -18,6 +18,64 @@ pub struct Cue {
 
 const MAX_SECTION_SIZE: usize = 4096;
 
+/// Legacy splice_command_length sentinel meaning "command length not specified".
+const SPLICE_COMMAND_LENGTH_UNSPECIFIED: u16 = 0xFFF;
+
+/// Parse a splice_info_section, tolerating the legacy splice_command_length
+/// sentinel 0xFFF ("not specified") still emitted by older broadcast splicers.
+///
+/// The scte35 crate treats the field as a literal byte count, so with 0xFFF it
+/// tries to skip 4095 bytes past the command and fails on every such section.
+/// For the known command types the command parser derives the real size from
+/// the command structure itself, making the length field redundant: rewrite it
+/// to 0 in a copy (the crate skips length reconciliation when no extra bytes
+/// are expected), fix up the CRC, parse that, and restore the on-wire field
+/// values in the result.
+pub fn parse_splice_info_section_tolerant(
+    section: &[u8],
+) -> std::io::Result<scte35::SpliceInfoSection> {
+    if let Some(normalized) = normalize_unspecified_command_length(section) {
+        let mut parsed = scte35::parse_splice_info_section(&normalized)?;
+        // Report the section as it appeared on the wire.
+        parsed.splice_command_length = SPLICE_COMMAND_LENGTH_UNSPECIFIED;
+        parsed.crc_32 = u32::from_be_bytes(section[section.len() - 4..].try_into().unwrap());
+        return Ok(parsed);
+    }
+    scte35::parse_splice_info_section(section)
+}
+
+/// If `section` is an unencrypted SCTE-35 section using the 0xFFF sentinel and
+/// carrying a command type whose size is self-describing, return a copy with
+/// splice_command_length set to 0 and the CRC recomputed. Otherwise None.
+fn normalize_unspecified_command_length(section: &[u8]) -> Option<Vec<u8>> {
+    // Minimum splice_null section: 3 header + 11 fixed + 2 descriptor_loop_length + 4 CRC.
+    if section.len() < 20 || section[0] != 0xFC {
+        return None;
+    }
+    let command_length = u16::from(section[11] & 0x0F) << 8 | u16::from(section[12]);
+    if command_length != SPLICE_COMMAND_LENGTH_UNSPECIFIED {
+        return None;
+    }
+    // Encrypted sections carry an opaque command body; leave them alone.
+    if section[4] & 0x80 != 0 {
+        return None;
+    }
+    // splice_null, splice_schedule, splice_insert, time_signal,
+    // bandwidth_reservation, private_command. For unknown command types the
+    // parser relies on the length field to skip, so 0xFFF is unrecoverable.
+    if !matches!(section[13], 0x00 | 0x04 | 0x05 | 0x06 | 0x07 | 0xFF) {
+        return None;
+    }
+    let mut normalized = section.to_vec();
+    normalized[11] &= 0xF0;
+    normalized[12] = 0;
+    use crc::{CRC_32_MPEG_2, Crc};
+    let crc = Crc::<u32>::new(&CRC_32_MPEG_2).checksum(&normalized[..normalized.len() - 4]);
+    let crc_pos = normalized.len() - 4;
+    normalized[crc_pos..].copy_from_slice(&crc.to_be_bytes());
+    Some(normalized)
+}
+
 /// Parse a cue argument of the form `placement[@splice]=<base64>`.
 pub fn parse_cue_arg(raw: &str) -> Result<Cue> {
     let (ts_str, b64_str) = raw
@@ -48,7 +106,7 @@ pub fn parse_cue_arg(raw: &str) -> Result<Cue> {
     }
 
     // Validate SCTE-35 section structure.
-    scte35::parse_splice_info_section(&payload).context("invalid SCTE-35 splice_info_section")?;
+    parse_splice_info_section_tolerant(&payload).context("invalid SCTE-35 splice_info_section")?;
 
     Ok(Cue {
         placement,
@@ -161,7 +219,7 @@ pub fn duration_to_pts(duration: Duration) -> Result<u64> {
 /// Rewrite splice_time inside a SCTE-35 section to a new 90kHz PTS.
 /// Supports time_signal and splice_insert (program-level) commands.
 pub fn rewrite_splice_time(payload: &[u8], new_pts_90k: u64) -> Result<Vec<u8>> {
-    let mut section = scte35::parse_splice_info_section(payload)
+    let mut section = parse_splice_info_section_tolerant(payload)
         .context("parse splice_info_section for rewrite")?;
     // Reset pts_adjustment so the explicit splice_time is absolute.
     section.pts_adjustment = 0;

@@ -74,9 +74,8 @@ pub fn list_scte35_cues_from_reader<R: Read>(
         // Section-carried SCTE-35 (table_id 0xFC) via PSI assembly
         if let Some(section) =
             section_asm.push(header.pid, header.payload_unit_start, Some(payload))
-            && scte35::parse_splice_info_section(&section).is_ok()
+            && let Ok(splice) = crate::parse_splice_info_section_tolerant(&section)
         {
-            let splice = scte35::parse_splice_info_section(&section).unwrap();
             let pts_90k_raw =
                 splice_command_pts(&splice.splice_command, splice.pts_adjustment).unwrap_or(0);
             let pts_90k = if let Some(base) = base_pts_90k {

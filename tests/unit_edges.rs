@@ -52,7 +52,7 @@ fn list_cues_from_reader_bad_stream_id_yields_none() {
         0xAA, 0xBB, 0xCC,
     ];
     // Wrap into one TS packet manually (pid 0x30)
-    let mut pkt = vec![0x47, 0x40 | 0x00, 0x30, 0x10]; // PUSI=1, PID=0x30, afc=1, cc=0
+    let mut pkt = vec![0x47, 0x40, 0x30, 0x10]; // PUSI=1, PID=0x30, afc=1, cc=0
     let mut payload = vec![0]; // pointer_field=0
     payload.extend_from_slice(&pes);
     payload.resize(184, 0xFF);
@@ -66,6 +66,70 @@ fn duration_to_pts_large_does_not_panic() {
     // very large duration should not panic; value will saturate in u128 math then cast
     let d = Duration::from_secs(10_000_000);
     let _ = scte35_injector::duration_to_pts(d).unwrap();
+}
+
+// Real broadcast sections with splice_command_length == 0xFFF (legacy "not
+// specified" sentinel), taken from issue #2. CRC-valid, unencrypted.
+const B64_NULL_FFF: &str = "/DARAAAAAAAAAP///wAAAE8lM5Y=";
+const B64_INSERT_OUT_FFF: &str =
+    "/DAvAAAAAAAAAP///wUAAAKWf+//4WoauH4BTFYgAAEAAAAKAAhDVUVJAAAAABD6TZ4=";
+const B64_INSERT_IN_FFF: &str = "/DAqAAAAAAAAAP///wUAAAKWf0//4rZw2AABAAAACgAIQ1VFSQAAAABuMzIe";
+
+fn b64_decode(b64: &str) -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .unwrap()
+}
+
+#[test]
+fn parse_tolerates_unspecified_command_length() {
+    let null = scte35_injector::parse_splice_info_section_tolerant(&b64_decode(B64_NULL_FFF))
+        .expect("splice_null with cmd_len 0xFFF should parse");
+    assert!(matches!(
+        null.splice_command,
+        scte35::SpliceCommand::SpliceNull
+    ));
+    assert_eq!(null.splice_command_length, 0xFFF);
+
+    let payload = b64_decode(B64_INSERT_OUT_FFF);
+    let out = scte35_injector::parse_splice_info_section_tolerant(&payload)
+        .expect("splice_insert OUT with cmd_len 0xFFF should parse");
+    assert_eq!(out.splice_command_length, 0xFFF);
+    // On-wire CRC must be reported, not the normalized copy's CRC.
+    assert_eq!(
+        out.crc_32,
+        u32::from_be_bytes(payload[payload.len() - 4..].try_into().unwrap())
+    );
+    let si = match out.splice_command {
+        scte35::SpliceCommand::SpliceInsert(si) => si,
+        other => panic!("expected SpliceInsert, got {:?}", other),
+    };
+    assert_eq!(si.out_of_network_indicator, 1);
+    assert!(si.splice_time.and_then(|t| t.pts_time).is_some());
+    assert!(si.break_duration.is_some());
+
+    let inn = scte35_injector::parse_splice_info_section_tolerant(&b64_decode(B64_INSERT_IN_FFF))
+        .expect("splice_insert IN with cmd_len 0xFFF should parse");
+    let si = match inn.splice_command {
+        scte35::SpliceCommand::SpliceInsert(si) => si,
+        other => panic!("expected SpliceInsert, got {:?}", other),
+    };
+    assert_eq!(si.out_of_network_indicator, 0);
+}
+
+#[test]
+fn list_cues_finds_sections_with_unspecified_command_length() {
+    let mut cc = scte35_injector::Continuity::default();
+    let payload = b64_decode(B64_INSERT_OUT_FFF);
+    let packets = packetize_scte35(0x30, 90_000, &payload, &mut cc).unwrap();
+    let mut bytes = Vec::new();
+    for p in packets {
+        bytes.extend_from_slice(&p);
+    }
+    let cues = list_scte35_cues_from_reader(Cursor::new(bytes), 0x30, Some(0), None).unwrap();
+    assert_eq!(cues.len(), 1);
+    // The original on-wire bytes must be reported, not a normalized copy.
+    assert_eq!(cues[0].payload, payload);
 }
 
 #[test]
