@@ -110,7 +110,7 @@ fn preserves_existing_scte35_and_adds_new() {
     let cues_out =
         scte35_injector::list::list_scte35_cues(&out, ProbeHints::default()).expect("list out");
     assert!(
-        cues_out.len() >= cues_in.len() + 1,
+        cues_out.len() > cues_in.len(),
         "expected at least one extra cue: in={}, out={}",
         cues_in.len(),
         cues_out.len()
@@ -123,7 +123,7 @@ fn count_pid_packets(path: &PathBuf, pid: u16) -> u64 {
     let mut rdr = BufReader::new(File::open(path).unwrap());
     let mut buf = [0u8; 188];
     let mut count = 0u64;
-    while let Ok(_) = rdr.read_exact(&mut buf) {
+    while rdr.read_exact(&mut buf).is_ok() {
         if buf[0] != 0x47 {
             continue;
         }
@@ -196,7 +196,7 @@ fn count_pic_timing_sei_in_file(path: &PathBuf) -> u64 {
         None => return 0,
     };
 
-    while let Ok(_) = rdr.read_exact(&mut buf) {
+    while rdr.read_exact(&mut buf).is_ok() {
         if buf[0] != 0x47 {
             continue;
         }

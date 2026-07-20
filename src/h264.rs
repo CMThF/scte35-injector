@@ -517,9 +517,8 @@ impl ClockTimestamp {
 
         // Add the frame offset
         let frames_per_second = frame_rate.ceil() as u64;
-        if frames_per_second > 0 {
-            let total_frames = result.n_frames as u64 + frames_to_add;
-            let extra_seconds = total_frames / frames_per_second;
+        let total_frames = result.n_frames as u64 + frames_to_add;
+        if let Some(extra_seconds) = total_frames.checked_div(frames_per_second) {
             result.n_frames = (total_frames % frames_per_second) as u8;
             if extra_seconds > 0 {
                 result = result.add_seconds(extra_seconds, frame_rate);
@@ -910,7 +909,7 @@ mod tests {
         assert_eq!(ts.seconds, 56);
         assert_eq!(ts.n_frames, 15);
         assert_eq!(ts.ct_type, 0);
-        assert_eq!(ts.discontinuity_flag, false);
+        assert!(!ts.discontinuity_flag);
     }
 
     #[test]
