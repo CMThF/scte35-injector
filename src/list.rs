@@ -27,9 +27,12 @@ pub fn list_scte35_cues(path: &Path, hints: ProbeHints) -> Result<Vec<Scte35CueI
         let mut seen_pids = std::collections::HashSet::new();
         let mut found_any = false;
         for program in meta.programs.iter().filter(|p| p.program_number != 0) {
+            // Per-stream hints (ref_pid, video_pid) are global and would pull
+            // every program's timeline from the same PID; drop them so each
+            // program is rebased against its own video timeline.
             let phints = ProbeHints {
                 program: Some(program.program_number),
-                ..hints
+                ..ProbeHints::default()
             };
             let pmeta = crate::probe_ts(path, phints)?;
             let Some(pid) = pmeta.scte35_pid else {

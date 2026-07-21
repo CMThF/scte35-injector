@@ -385,6 +385,9 @@ fn pmt_versions(bytes: &[u8], pmt_pid: u16) -> Vec<u8> {
         } else {
             4
         };
+        if offset >= 188 {
+            continue;
+        }
         offset += 1 + pkt[offset] as usize; // pointer_field
         // table_id at offset, version_number at offset + 5
         if offset + 5 < 188 && pkt[offset] == 0x02 {
