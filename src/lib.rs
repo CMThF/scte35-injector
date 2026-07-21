@@ -160,6 +160,22 @@ pub struct ProbeHints {
     pub scte35_pid: Option<u16>,
     pub pcr_pid: Option<u16>,
     pub video_pid: Option<u16>,
+    /// Program number to target in a multi-program TS. Defaults to the first
+    /// non-zero program listed in the PAT.
+    pub program: Option<u16>,
+    /// Explicit timeline reference PID. Overrides the video PID as the source
+    /// of the PTS timeline used for cue placement.
+    pub ref_pid: Option<u16>,
+}
+
+/// Where to anchor cue packets relative to the target PTS.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum InsertPolicy {
+    /// Anchor at the last timeline packet with PTS at or before the target (default).
+    #[default]
+    Before,
+    /// Anchor at the first timeline packet with PTS at or after the target.
+    After,
 }
 
 /// Basic metadata extracted from an MPEG-TS.
@@ -169,11 +185,14 @@ pub struct TsMetadata {
     pub pcr_pid: Option<u16>,
     pub scte35_pid: Option<u16>,
     pub video_pid: Option<u16>,
+    /// All programs listed in the PAT (program_number, PMT PID).
+    pub programs: Vec<PatProgram>,
     /// All used PID values found.
     pub used_pids: HashSet<u16>,
-    /// PTS timeline for the chosen video_pid (packet index, pts 90kHz).
+    /// PTS timeline for the timeline reference PID (packet index, pts 90kHz).
+    /// The reference is the ref_pid hint if given, otherwise the video PID.
     pub timeline: Vec<PacketPts>,
-    /// First seen PMT section (raw bytes, no pointer_field).
+    /// First seen PMT section of the selected program (raw bytes, no pointer_field).
     pub pmt_section: Option<Vec<u8>>,
 }
 
@@ -191,6 +210,15 @@ pub struct Continuity {
 impl Continuity {
     pub fn peek(&self, pid: u16) -> Option<u8> {
         self.map.get(&pid).copied()
+    }
+    /// Seed the counter for a PID if not tracked yet, so the first emitted
+    /// packet reuses the given value (typically the incoming packet's counter).
+    pub fn seed(&mut self, pid: u16, value: u8) {
+        self.map.entry(pid).or_insert(value);
+    }
+    /// Continuity counter of the last packet emitted on this PID, if any.
+    pub fn last_emitted(&self, pid: u16) -> Option<u8> {
+        self.map.get(&pid).map(|next| next.wrapping_sub(1) & 0x0F)
     }
     pub fn next(&mut self, pid: u16, suggested: Option<u8>) -> u8 {
         let entry = self
@@ -262,23 +290,49 @@ pub fn rewrite_splice_time(payload: &[u8], new_pts_90k: u64) -> Result<Vec<u8>> 
 
 /// Choose insertion packet index at/before the desired PTS.
 pub fn choose_insertion_packet(timeline: &[PacketPts], target_pts: u64) -> Option<PacketPts> {
+    choose_insertion_packet_with_policy(timeline, target_pts, InsertPolicy::Before)
+}
+
+/// Choose the anchor packet for a cue according to the insertion policy.
+pub fn choose_insertion_packet_with_policy(
+    timeline: &[PacketPts],
+    target_pts: u64,
+    policy: InsertPolicy,
+) -> Option<PacketPts> {
     if timeline.is_empty() {
         return None;
     }
-    // Find last point with pts <= target, else first.
-    let mut chosen = timeline[0];
-    for pt in timeline {
-        if pt.pts_90k <= target_pts {
-            chosen = *pt;
-        } else {
-            break;
+    match policy {
+        InsertPolicy::Before => {
+            // Find last point with pts <= target, else first.
+            let mut chosen = timeline[0];
+            for pt in timeline {
+                if pt.pts_90k <= target_pts {
+                    chosen = *pt;
+                } else {
+                    break;
+                }
+            }
+            Some(chosen)
+        }
+        InsertPolicy::After => {
+            // Find first point with pts >= target, else last.
+            timeline
+                .iter()
+                .find(|pt| pt.pts_90k >= target_pts)
+                .copied()
+                .or_else(|| timeline.last().copied())
         }
     }
-    Some(chosen)
 }
 
 /// Probe a TS file: discover PAT/PMT, PCR, video PID, SCTE-35 PID and gather PTS timeline.
 pub fn probe_ts(path: &Path, hints: ProbeHints) -> Result<TsMetadata> {
+    if hints.program == Some(0) {
+        return Err(anyhow!(
+            "program 0 is the network PID entry in the PAT, not a program"
+        ));
+    }
     let file = File::open(path).with_context(|| format!("open {:?}", path))?;
     let mut reader = BufReader::new(file);
 
@@ -286,9 +340,11 @@ pub fn probe_ts(path: &Path, hints: ProbeHints) -> Result<TsMetadata> {
     let mut assembler = PsiAssembler::default();
 
     let mut pmt_pid: Option<u16> = None;
+    let mut selected_program: Option<u16> = None;
     let mut pcr_pid: Option<u16> = hints.pcr_pid;
     let mut scte35_pid: Option<u16> = hints.scte35_pid;
     let mut video_pid_hint = hints.video_pid;
+    let mut programs: Vec<PatProgram> = Vec::new();
     let mut stream_types: HashMap<u16, u8> = HashMap::new();
     let mut pts_map: HashMap<u16, Vec<PacketPts>> = HashMap::new();
     let mut pmt_section: Option<Vec<u8>> = None;
@@ -309,14 +365,18 @@ pub fn probe_ts(path: &Path, hints: ProbeHints) -> Result<TsMetadata> {
         // PAT
         if header.pid == 0x0000
             && let Some(section) = assembler.push(header.pid, payload_start, payload)
-            && let Some(pmt) = parse_pat(&section)?
         {
-            pmt_pid = Some(pmt);
+            programs = parse_pat_programs(&section)?;
+            let selected = select_program(&programs, hints.program);
+            pmt_pid = selected.map(|p| p.pmt_pid);
+            selected_program = selected.map(|p| p.program_number);
         }
-        // PMT
+        // PMT (programs may share a PMT PID; match on program_number too)
         if let Some(pid) = pmt_pid
             && header.pid == pid
             && let Some(section) = assembler.push(header.pid, payload_start, payload)
+            && section.len() >= 5
+            && selected_program.is_none_or(|n| ((section[3] as u16) << 8 | section[4] as u16) == n)
         {
             if pmt_section.is_none() {
                 pmt_section = Some(section.clone());
@@ -351,8 +411,23 @@ pub fn probe_ts(path: &Path, hints: ProbeHints) -> Result<TsMetadata> {
         packet_index += 1;
     }
 
+    if let Some(wanted) = hints.program
+        && pmt_pid.is_none()
+        && !programs.is_empty()
+    {
+        return Err(anyhow!(
+            "program {} not found in PAT (available: {:?})",
+            wanted,
+            programs
+                .iter()
+                .map(|p| p.program_number)
+                .collect::<Vec<_>>()
+        ));
+    }
+
     let video_pid = video_pid_hint;
-    let timeline = video_pid
+    let timeline_pid = hints.ref_pid.or(video_pid);
+    let timeline = timeline_pid
         .and_then(|pid| pts_map.remove(&pid))
         .unwrap_or_default();
 
@@ -361,10 +436,23 @@ pub fn probe_ts(path: &Path, hints: ProbeHints) -> Result<TsMetadata> {
         pcr_pid,
         scte35_pid,
         video_pid,
+        programs,
         used_pids,
         timeline,
         pmt_section,
     })
+}
+
+/// Pick a program from the PAT: the requested number if given, else the first
+/// non-zero program (program 0 points at the network PID, not a PMT).
+pub fn select_program(programs: &[PatProgram], wanted: Option<u16>) -> Option<PatProgram> {
+    match wanted {
+        Some(number) => programs
+            .iter()
+            .find(|p| p.program_number == number)
+            .copied(),
+        None => programs.iter().find(|p| p.program_number != 0).copied(),
+    }
 }
 
 // --- Minimal MPEG-TS parsing helpers --------------------------------------
@@ -458,13 +546,14 @@ impl PsiAssembler {
     }
 }
 
-#[derive(Debug)]
-struct PatProgram {
+/// A single PAT entry (program_number, PMT PID).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatProgram {
     pub program_number: u16,
     pub pmt_pid: u16,
 }
 
-fn parse_pat(section: &[u8]) -> Result<Option<u16>> {
+pub(crate) fn parse_pat_programs(section: &[u8]) -> Result<Vec<PatProgram>> {
     if section.len() < 8 {
         return Err(anyhow!("PAT section too short"));
     }
@@ -487,12 +576,7 @@ fn parse_pat(section: &[u8]) -> Result<Option<u16>> {
         });
         idx += 4;
     }
-    // choose first non-zero program
-    let pmt_pid = programs
-        .into_iter()
-        .find(|p| p.program_number != 0)
-        .map(|p| p.pmt_pid);
-    Ok(pmt_pid)
+    Ok(programs)
 }
 
 #[derive(Debug)]
