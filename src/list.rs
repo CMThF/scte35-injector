@@ -1,4 +1,4 @@
-use crate::{ProbeHints, PsiAssembler, TsHeader, parse_pat, parse_pmt};
+use crate::{ProbeHints, PsiAssembler, TsHeader, parse_pat_programs, parse_pmt, select_program};
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use scte35::SpliceCommand;
@@ -19,12 +19,47 @@ pub struct Scte35CueInfo {
 pub fn list_scte35_cues(path: &Path, hints: ProbeHints) -> Result<Vec<Scte35CueInfo>> {
     // First pass: find SCTE PID via PAT/PMT unless hinted.
     let meta = crate::probe_ts(path, hints)?;
+
+    // Multi-program TS without explicit targeting: list every program's
+    // SCTE-35 PID against that program's own timeline.
+    if hints.scte35_pid.is_none() && hints.program.is_none() && meta.programs.len() > 1 {
+        let mut cues = Vec::new();
+        let mut seen_pids = std::collections::HashSet::new();
+        let mut found_any = false;
+        for program in meta.programs.iter().filter(|p| p.program_number != 0) {
+            let phints = ProbeHints {
+                program: Some(program.program_number),
+                ..hints
+            };
+            let pmeta = crate::probe_ts(path, phints)?;
+            let Some(pid) = pmeta.scte35_pid else {
+                continue;
+            };
+            found_any = true;
+            if !seen_pids.insert(pid) {
+                continue;
+            }
+            let reader = BufReader::new(File::open(path)?);
+            let base_pts = pmeta.timeline.first().map(|p| p.pts_90k);
+            cues.extend(list_scte35_cues_from_reader(
+                reader,
+                pid,
+                base_pts,
+                Some(&pmeta.timeline),
+            )?);
+        }
+        if found_any {
+            return Ok(cues);
+        }
+        // No program declares SCTE-35: fall through to the heuristics below.
+    }
+
     let base_pts = meta.timeline.first().map(|p| p.pts_90k);
     let scte35_pid = if let Some(pid) = hints.scte35_pid {
         pid
     } else if let Some(pid) = meta.scte35_pid {
         pid
-    } else if let Some(pid) = find_scte35_pid(path)? {
+    } else if let Some(pid) = find_scte35_pid(path, hints.program)? {
         pid
     } else if let Some(pid) = scan_scte35_pid_by_pes(path)? {
         pid
@@ -233,12 +268,14 @@ fn parse_scte35_pes(pes: &[u8]) -> Result<Option<Scte35CueInfo>> {
     }))
 }
 
-fn find_scte35_pid(path: &Path) -> Result<Option<u16>> {
+fn find_scte35_pid(path: &Path, program: Option<u16>) -> Result<Option<u16>> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut buf = [0u8; 188];
     let mut assembler = super::PsiAssembler::default();
-    let mut pmt_pid: Option<u16> = None;
+    // PMT PIDs to inspect: the selected program only if a program was
+    // requested, otherwise every program listed in the PAT.
+    let mut pmt_pids: std::collections::HashSet<u16> = std::collections::HashSet::new();
     while reader.read_exact(&mut buf).is_ok() {
         if buf[0] != 0x47 {
             return Err(anyhow!("sync byte missing"));
@@ -247,10 +284,21 @@ fn find_scte35_pid(path: &Path) -> Result<Option<u16>> {
         let payload = header.payload(&buf)?;
         if header.pid == 0x0000
             && let Some(section) = assembler.push(header.pid, header.payload_unit_start, payload)
-            && let Some(pid) = parse_pat(&section)?
         {
-            pmt_pid = Some(pid);
-        } else if Some(header.pid) == pmt_pid
+            let programs = parse_pat_programs(&section)?;
+            if let Some(wanted) = program {
+                pmt_pids = select_program(&programs, Some(wanted))
+                    .map(|p| p.pmt_pid)
+                    .into_iter()
+                    .collect();
+            } else {
+                pmt_pids = programs
+                    .iter()
+                    .filter(|p| p.program_number != 0)
+                    .map(|p| p.pmt_pid)
+                    .collect();
+            }
+        } else if pmt_pids.contains(&header.pid)
             && let Some(section) = assembler.push(header.pid, header.payload_unit_start, payload)
         {
             let pmt = parse_pmt(&section)?;

@@ -45,6 +45,9 @@ This note is for anyone picking up work on `scte35-injector` and needing the qui
 - PMT rewrite: adds stream_type `0x86`, program-level registration descriptor `CUEI`; version bumps and CRC recomputed; all PMT packets are replaced when adding SCTE so later PMT versions don’t erase the stream.
 - PTS math: `list-cues` applies `pts_adjustment`, re-bases against earliest timeline PTS, and interpolates between nearby timeline entries to report human-readable timestamps.
 - Memory: current pipeline streams packets; does not load full TS into RAM.
+- Multi-program: `--program` selects the target program; PAT parsing returns all programs, only the selected PMT is rewritten, and cue listing scans all programs' PMTs.
+- Placement: `--insert-policy before|after` anchors cues at the last frame at/before or first frame at/after the target PTS; `--ref-pid` overrides the video PID as timeline reference.
+- Rate shaping: `--pad-nulls` drops one null packet per inserted packet; `--pmt-interval-ms` re-emits the PMT at a minimum cadence (packet interval estimated from the reference timeline).
 
 ## Common Gotchas
 - If `--cue` is omitted, injection exits with a warning (no-op).
@@ -61,8 +64,10 @@ This note is for anyone picking up work on `scte35-injector` and needing the qui
 - `src/inject.rs` — PMT rewrite & packet injection.
 - `src/list.rs` — cue discovery + PTS/timestamp calculation.
 - `src/lib.rs` — shared parsing/packet helpers, probe.
-- `tests/e2e_asset_test.rs` — end-to-end coverage for inject + detect.
+- `tests/e2e_asset_test.rs` — end-to-end coverage for inject + detect (needs large assets).
 - `tests/unit_edges.rs` — edge conditions (oversize, bad formats).
+- `tests/common/mod.rs` — deterministic synthetic TS fixture builder.
+- `tests/synthetic_golden.rs` — fast tests on synthetic fixtures pinned with SHA-256 golden hashes (multi-program, insert policy, pad-nulls, PMT interval).
 - `test-assets/` — sample TS inputs.
 
 That’s the minimal context to get productive quickly. If you change PMT logic or cue timing, re-run `cargo test` and validate with `ffprobe` and `tsp splicemonitor` as above. Good hunting.

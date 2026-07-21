@@ -14,6 +14,10 @@ MPEG-TS CLI tool to detect, insert, and list SCTE-35 cues. Think of it as a ligh
 - **Inject cues**: Add base64-encoded SCTE-35 `splice_info_section` messages.
 - **Dual timestamps**: `placement@splice=` — control where packets are placed *and* the internal `splice_time` carried in the cue.
 - **Auto-add SCTE-35 PID**: If none exists, allocate one, rewrite PMT (CRC-correct, with CUEI reg descriptor), and update continuity.
+- **Periodic PMT repetition**: `--pmt-interval-ms` re-emits the (updated) PMT at a minimum cadence so decoders joining mid-stream pick up the SCTE-35 PID quickly.
+- **Bitrate-safe padding**: `--pad-nulls` drops one null packet per inserted packet, keeping the mux bitrate and PCR spacing intact.
+- **Multi-program TS**: `--program` selects the program to target; PAT parsing, PMT rewrite, and cue listing are program-aware.
+- **Insertion policy**: `--insert-policy before|after` anchors cue packets at the last frame at/before or the first frame at/after the target PTS; `--ref-pid` selects an explicit timeline reference PID.
 - **Continuity-safe**: Maintains continuity counters for all PIDs it touches.
 - **List cues**: Finds cues via PMT, PSI sections (`table_id 0xFC`), or PES (`stream_id 0xFC`); reports PTS and base64.
 - **Picture Timing SEI**: Inject H.264 Picture Timing SEI messages on video keyframes with incrementing timestamps.
@@ -56,6 +60,11 @@ Options:
       --scte35-pid <SCTE_PID>   Optional SCTE-35 PID hint (hex or decimal)
       --pcr-pid <PCR_PID>       Optional PCR PID hint
       --video-pid <VIDEO_PID>   Optional video PID hint (timing reference)
+      --ref-pid <REF_PID>       Explicit timeline reference PID for cue placement (overrides the video PID)
+      --program <PROGRAM>       Program number to target in a multi-program TS (defaults to first program in PAT)
+      --insert-policy <POLICY>  Anchor cue packets before or after the target PTS [default: before] [possible values: before, after]
+      --pmt-interval-ms <MS>    Repeat the PMT at least every N milliseconds
+      --pad-nulls               Drop one null packet per inserted packet to keep bitrate and PCR spacing
       --list-cues               List SCTE-35 cues present in the input, then exit
       --pic-timing-start <TIME> Start time for Picture Timing SEI injection (HH:MM:SS.mmm)
   -h, --help                    Print help
@@ -70,7 +79,7 @@ Options:
 
 On inject:
 - Payload is validated; if `@splice` is provided, the cue is re-encoded with the new `splice_time` (33-bit wrap respected).
-- Packets are placed at the nearest packet at/before the target PTS derived from the reference timeline.
+- Packets are placed at the nearest reference packet at/before the target PTS (default), or at/after it with `--insert-policy after`. The reference timeline comes from `--ref-pid` if given, otherwise the detected or hinted video PID.
 
 ## Picture Timing SEI
 
@@ -92,12 +101,13 @@ scte35-injector --input input.ts --output output.ts \
 
 ## Behavior and assumptions
 
-- Single-program TS expected. PMT rewrite handles one PMT; multi-PMT not yet supported.
-- If no SCTE PID exists, a free PID ≥ 0x30 is allocated and every PMT packet is rewritten to include it (version bump, CRC).
-- Bitrate: we insert packets; not currently doing CBR shaping. Add nulls after if you need strict rate.
-- Timing reference: first detected video PID unless `--video-pid` hint is given. PCR PID is discovered or hinted.
-- Listing: supports PSI (`table_id 0xFC`) and PES (`stream_id 0xFC`), with PMT discovery or heuristic PID scan.
-- Streaming: no full-file buffering. Probe caps metadata search to ~200k packets; timeline collection otherwise grows with duration.
+- Multi-program TS supported: `--program` selects the target program; without it the first program listed in the PAT is used. Only the selected program's PMT is rewritten.
+- If no SCTE-35 PID exists, a free PID ≥ 0x30 is allocated and every PMT packet of the selected program is rewritten to include it (version bump, CRC).
+- Bitrate: inserted packets grow the file by default. `--pad-nulls` compensates by dropping one null packet (PID 0x1FFF) per inserted packet, preserving mux bitrate and PCR spacing; if the stream carries too few nulls, the remainder is reported.
+- PMT cadence: `--pmt-interval-ms` re-emits the PMT whenever more packets than the estimated interval passed without one (interval derived from the reference timeline's average packet rate). Uses the updated PMT when an SCTE-35 PID was added, otherwise the latest section seen on the wire (mid-stream PMT changes are followed). Only the PMT is repeated; the PAT is expected to repeat at its native cadence.
+- Timing reference: `--ref-pid` if given, else the first detected video PID or the `--video-pid` hint. PCR PID is discovered or hinted.
+- Listing: supports PSI (`table_id 0xFC`) and PES (`stream_id 0xFC`), with PMT discovery across all programs or heuristic PID scan.
+- Streaming: no full-file buffering; timeline collection grows with duration.
 
 ## Project layout
 
@@ -107,21 +117,22 @@ scte35-injector --input input.ts --output output.ts \
 - `src/list.rs`          Cue listing pipeline.
 - `src/h264.rs`          H.264 NAL parsing, Picture Timing SEI encoding, VUI extraction.
 - `test-assets/`         Sample TS fixtures.
+- `tests/common/`        Deterministic synthetic TS fixture builder for fast CI tests.
 
 ## Testing
 
 ```bash
 cargo test           # unit + integration
+cargo test --test synthetic_golden   # fast synthetic fixtures with golden hashes (no large assets needed)
 cargo run -- --input test-assets/... --list-cues   # manual validation
 ```
 
+The `synthetic_golden` tests build small single- and multi-program TS fixtures in memory and pin both the fixture bytes and the injector output with SHA-256 golden hashes, so format regressions are caught without the large `test-assets/` files.
+
 ## Roadmap / TODO
 
-- Periodic PMT repetition after adding SCTE PID.
-- Optional null-packet padding to maintain bitrate and PCR spacing.
-- Multi-program TS support.
-- Configurable insertion policy (before/after target PTS) and explicit reference PID selection.
-- Additional small synthetic fixtures with golden hashes for faster CI.
+- More source formats: read SCTE-35 cues from sidecar JSON/base64 lists.
+- Additional validators: integrate `tsp -P analyze` summaries into CI.
 
 ## Safety notes
 
